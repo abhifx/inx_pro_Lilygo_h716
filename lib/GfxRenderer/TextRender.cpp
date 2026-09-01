@@ -94,7 +94,7 @@ void renderMediumTextPlanePixel(const GfxRenderer& gfx, const int x, const int y
     return;
   }
   if (mediumTextPlaneShouldClear(gfx, level)) {
-    gfx.drawPixel(x, y, false);
+    gfx.drawPixel(x, y, true);
   }
 }
 

@@ -143,13 +143,13 @@ inline bool bwShouldInk2bpp(const uint8_t stage03, const ImageRenderMode mode) {
 }
 
 inline bool grayMsbShouldInk2bpp(const uint8_t stage03) {
-  const uint8_t st = stage03 & 3u;
-  return st == 1u || st == 2u;
+  const uint8_t code = grayscaleCodeTable()[stage03 & 3u];
+  return (code & 0b10u) != 0u;
 }
 
 inline bool grayLsbShouldInk2bpp(const uint8_t stage03) {
-  const uint8_t st = stage03 & 3u;
-  return st == 1u;
+  const uint8_t code = grayscaleCodeTable()[stage03 & 3u];
+  return (code & 0b01u) != 0u;
 }
 
 inline bool gray2LsbShouldClear2bpp(const uint8_t stage03) {
