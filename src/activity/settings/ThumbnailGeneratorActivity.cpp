@@ -222,8 +222,10 @@ bool ThumbnailGeneratorActivity::shouldSkipPath(const char* name) const {
 }
 
 bool ThumbnailGeneratorActivity::isSupportedBookFile(const std::string& filename) const {
-  return StringUtils::checkFileExtension(filename, ".epub") || StringUtils::checkFileExtension(filename, ".xtc") ||
-         StringUtils::checkFileExtension(filename, ".pdf");
+  return StringUtils::checkFileExtension(filename, ".epub") || StringUtils::checkFileExtension(filename, ".pdf") ||
+         StringUtils::checkFileExtension(filename, ".txt") || StringUtils::checkFileExtension(filename, ".md") ||
+         StringUtils::checkFileExtension(filename, ".xtc") || StringUtils::checkFileExtension(filename, ".xtch") ||
+         StringUtils::checkFileExtension(filename, ".mobi");
 }
 
 bool ThumbnailGeneratorActivity::processBook(const std::string& path) {

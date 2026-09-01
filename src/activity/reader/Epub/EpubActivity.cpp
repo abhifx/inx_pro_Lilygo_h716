@@ -30,7 +30,7 @@
 #include "EpubReadingStats.h"
 #include "ReadingGuideLines.h"
 #if FREEINK_CAP_MIC
-#include "VoiceNoteActivity.h"
+// #include "VoiceNoteActivity.h"
 #endif
 #include "KOReaderSyncActivity.h"
 #include "SettingsDrawer.h"
@@ -356,6 +356,13 @@ std::unique_ptr<Section> EpubActivity::loadSection(int spineIndex, const Viewpor
  * @brief Sets up orientation based on book settings
  */
 void EpubActivity::setupOrientation() {
+#if FREEINK_DEVICE_LILYGO
+  // Force Portrait orientation on LilyGo H716 unless explicitly set to inverted portrait
+  if (bookSettings.orientation == SystemSetting::ORIENTATION::LANDSCAPE_CW ||
+      bookSettings.orientation == SystemSetting::ORIENTATION::LANDSCAPE_CCW) {
+    bookSettings.orientation = SystemSetting::ORIENTATION::PORTRAIT;
+  }
+#endif
   switch (bookSettings.orientation) {
     case SystemSetting::ORIENTATION::PORTRAIT:
       renderer.setOrientation(GfxRenderer::Orientation::Portrait);
@@ -789,6 +796,7 @@ void EpubActivity::startVoiceNoteForSelection(const std::string& selectedText, c
   if (!epub || !section || selectedText.empty()) {
     return;
   }
+/*
   const std::string voiceDirectory = epub->getCachePath() + "/voice";
   enterNewActivity(new VoiceNoteActivity(
       renderer, mappedInput, voiceDirectory,
@@ -807,6 +815,7 @@ void EpubActivity::startVoiceNoteForSelection(const std::string& selectedText, c
         exitActivity();
         updateRequired = true;
       }));
+*/
 #endif  // FREEINK_CAP_MIC
 }
 
@@ -1607,7 +1616,7 @@ bool EpubActivity::finishPreparedPageGrayscale(const PreparedPage& prepared) {
       const bool textBwStored = renderer.storeBwBuffer();
       if (textBwStored) {
         renderer.renderGrayscalePasses(/*quality=*/false, /*preserveText=*/true, [&] {
-          renderer.clearScreen(0x00);
+          renderer.clearScreen(0xFF);
           page->render(renderer, fontId, headerFontId, info.totalMarginLeft, info.totalMarginTop,
                        /*skipImages=*/true, ImageRenderMode::OneBit);
         });
@@ -1615,13 +1624,13 @@ bool EpubActivity::finishPreparedPageGrayscale(const PreparedPage& prepared) {
     }
   } else if (textAa && !mediumImageGrayscale) {
     renderer.renderGrayscalePasses(/*quality=*/false, /*preserveText=*/true, [&] {
-      renderer.clearScreen(0x00);
+      renderer.clearScreen(0xFF);
       page->render(renderer, fontId, headerFontId, info.totalMarginLeft, info.totalMarginTop,
                    /*skipImages=*/false, ImageRenderMode::OneBit);
     });
   } else {
     ImageRender::displayGrayscale(renderer, /*quality=*/false, /*preserveText=*/true, [&] {
-      renderer.clearScreen(0x00);
+      renderer.clearScreen(0xFF);
       if (textAa) {
         page->render(renderer, fontId, headerFontId, info.totalMarginLeft, info.totalMarginTop,
                      /*skipImages=*/true, ImageRenderMode::OneBit);
@@ -2139,7 +2148,7 @@ void EpubActivity::renderContents(Page* page, const int orientedMarginTop,
       const bool textBwStored = renderer.storeBwBuffer();
       if (textBwStored) {
         renderer.renderGrayscalePasses(/*quality=*/false, /*preserveText=*/true, [&] {
-          renderer.clearScreen(0x00);
+          renderer.clearScreen(0xFF);
           page->render(renderer, fontId, headerFontId, orientedMarginLeft, orientedMarginTop, /*skipImages=*/true,
                        ImageRenderMode::OneBit);
         });
@@ -2147,7 +2156,7 @@ void EpubActivity::renderContents(Page* page, const int orientedMarginTop,
     }
   } else if (needsTextAntiAliasPass && bwStored && !mediumImageGrayscale) {
     renderer.renderGrayscalePasses(/*quality=*/false, /*preserveText=*/true, [&] {
-      renderer.clearScreen(0x00);
+      renderer.clearScreen(0xFF);
       // Regular images are no longer deferred, so keep them in the AA planes instead of allowing the
       // text-only pass to replace their freshly rendered region with the grayscale background.
       page->render(renderer, fontId, headerFontId, orientedMarginLeft, orientedMarginTop, /*skipImages=*/false,
@@ -2155,7 +2164,7 @@ void EpubActivity::renderContents(Page* page, const int orientedMarginTop,
     });
   } else if (mediumImageGrayscale || (needsTextAntiAliasPass && bwStored)) {
     ImageRender::displayGrayscale(renderer, /*quality=*/false, /*preserveText=*/bwStored, [&] {
-      renderer.clearScreen(0x00);
+      renderer.clearScreen(0xFF);
       if (needsTextAntiAliasPass && bwStored) {
         page->render(renderer, fontId, headerFontId, orientedMarginLeft, orientedMarginTop, /*skipImages=*/true,
                      ImageRenderMode::OneBit);

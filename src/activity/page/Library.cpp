@@ -80,6 +80,16 @@ std::string lower(std::string value) {
   return value;
 }
 
+bool caseInsensitiveLess(const std::string& a, const std::string& b) {
+  const size_t len = std::min(a.size(), b.size());
+  for (size_t i = 0; i < len; ++i) {
+    const unsigned char ca = static_cast<unsigned char>(std::tolower(static_cast<unsigned char>(a[i])));
+    const unsigned char cb = static_cast<unsigned char>(std::tolower(static_cast<unsigned char>(b[i])));
+    if (ca != cb) return ca < cb;
+  }
+  return a.size() < b.size();
+}
+
 char firstLetter(const std::string& value) {
   for (const unsigned char c : value) {
     if (std::isalpha(c)) return static_cast<char>(std::toupper(c));
@@ -98,7 +108,7 @@ bool endsWith(const std::string& value, const char* suffix) {
 bool matchesTypeFilter(const std::string& path, const std::string& category) {
   if (category.empty()) return true;
   const std::string value = lower(path);
-  if (category == "epub") return endsWith(value, ".epub");
+  if (category == "epub") return endsWith(value, ".epub") || endsWith(value, ".mobi");
   if (category == "pdf") return endsWith(value, ".pdf");
   if (category == "txt") return endsWith(value, ".txt") || endsWith(value, ".md");
   if (category == "xtc") return endsWith(value, ".xtc") || endsWith(value, ".xtch");
@@ -378,24 +388,24 @@ void Library::load() {
 
   std::stable_sort(items.begin(), items.end(), [this](const LibraryIndex::Book& left,
                                                        const LibraryIndex::Book& right) {
-    const std::string leftTitle = lower(left.title);
-    const std::string rightTitle = lower(right.title);
-    const std::string leftFolder = lower(left.folder.empty() ? parent(left.path) : left.folder);
-    const std::string rightFolder = lower(right.folder.empty() ? parent(right.path) : right.folder);
     if (sort == Sort::AuthorAZ || sort == Sort::AuthorZA) {
-      const std::string leftAuthor = lower(left.author);
-      const std::string rightAuthor = lower(right.author);
-      if (leftAuthor != rightAuthor) {
-        return sort == Sort::AuthorAZ ? leftAuthor < rightAuthor : leftAuthor > rightAuthor;
+      if (left.author != right.author) {
+        return sort == Sort::AuthorAZ ? caseInsensitiveLess(left.author, right.author)
+                                      : caseInsensitiveLess(right.author, left.author);
       }
     }
     if (sort == Sort::FolderAZ || sort == Sort::FolderZA) {
+      const std::string& leftFolder = left.folder.empty() ? parent(left.path) : left.folder;
+      const std::string& rightFolder = right.folder.empty() ? parent(right.path) : right.folder;
       if (leftFolder != rightFolder) {
-        return sort == Sort::FolderAZ ? leftFolder < rightFolder : leftFolder > rightFolder;
+        return sort == Sort::FolderAZ ? caseInsensitiveLess(leftFolder, rightFolder)
+                                      : caseInsensitiveLess(rightFolder, leftFolder);
       }
     }
-    if (sort == Sort::TitleZA || sort == Sort::FolderZA || sort == Sort::AuthorZA) return leftTitle > rightTitle;
-    return leftTitle < rightTitle;
+    if (sort == Sort::TitleZA || sort == Sort::FolderZA || sort == Sort::AuthorZA) {
+      return caseInsensitiveLess(right.title, left.title);
+    }
+    return caseInsensitiveLess(left.title, right.title);
   });
   resetViews();
   thumb.setRoot(path == "/" && !allBooksMode);

@@ -523,14 +523,14 @@ void SleepActivity::renderFill(const Bitmap& bitmap) const {
       });
     } else {
       bitmap.rewindToData();
-      renderer.clearScreen(0x00);
+      renderer.clearScreen(0xFF);
       renderer.setRenderMode(GfxRenderer::GRAYSCALE_LSB);
       renderer.bitmap.sleepScreen(bitmap, x, y, pageWidth, pageHeight, cropX, cropY, kCoverFill,
                                   ImageRenderMode::TwoBit);
       renderer.copyGrayscaleLsbBuffers();
 
       bitmap.rewindToData();
-      renderer.clearScreen(0x00);
+      renderer.clearScreen(0xFF);
       renderer.setRenderMode(GfxRenderer::GRAYSCALE_MSB);
       renderer.bitmap.sleepScreen(bitmap, x, y, pageWidth, pageHeight, cropX, cropY, kCoverFill,
                                   ImageRenderMode::TwoBit);
@@ -608,14 +608,14 @@ void SleepActivity::renderBitmapSleepScreen(const Bitmap& bitmap, const bool pre
       });
     } else {
       bitmap.rewindToData();
-      renderer.clearScreen(0x00);
+      renderer.clearScreen(0xFF);
       renderer.setRenderMode(GfxRenderer::GRAYSCALE_LSB);
       renderer.bitmap.sleepScreen(bitmap, x, y, pageWidth, pageHeight, cropX, cropY, coverFill,
                                   ImageRenderMode::TwoBit);
       renderer.copyGrayscaleLsbBuffers();
 
       bitmap.rewindToData();
-      renderer.clearScreen(0x00);
+      renderer.clearScreen(0xFF);
       renderer.setRenderMode(GfxRenderer::GRAYSCALE_MSB);
       renderer.bitmap.sleepScreen(bitmap, x, y, pageWidth, pageHeight, cropX, cropY, coverFill,
                                   ImageRenderMode::TwoBit);

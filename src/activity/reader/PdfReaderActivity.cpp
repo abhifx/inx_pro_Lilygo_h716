@@ -104,7 +104,15 @@ void PdfReaderActivity::onEnter() {
     return;
   }
 
-  switch (READER_SETTINGS.orientation) {
+  uint8_t orientation = READER_SETTINGS.orientation;
+#if FREEINK_DEVICE_LILYGO
+  if (orientation == SystemSetting::ORIENTATION::LANDSCAPE_CW ||
+      orientation == SystemSetting::ORIENTATION::LANDSCAPE_CCW) {
+    orientation = SystemSetting::ORIENTATION::PORTRAIT;
+  }
+#endif
+
+  switch (orientation) {
     case SystemSetting::ORIENTATION::PORTRAIT:
       renderer.setOrientation(GfxRenderer::Orientation::Portrait);
       break;
@@ -809,12 +817,12 @@ void PdfReaderActivity::renderPage() {
   if (READER_SETTINGS.textAntiAliasing && renderer.text.supportsAntiAliasing(cachedFontId)) {
     renderer.storeBwBuffer();
 
-    renderer.clearScreen(0x00);
+    renderer.clearScreen(0xFF);
     renderer.setRenderMode(GfxRenderer::GRAYSCALE_LSB);
     renderPageContent();
     renderer.copyGrayscaleLsbBuffers();
 
-    renderer.clearScreen(0x00);
+    renderer.clearScreen(0xFF);
     renderer.setRenderMode(GfxRenderer::GRAYSCALE_MSB);
     renderPageContent();
     renderer.copyGrayscaleMsbBuffers();

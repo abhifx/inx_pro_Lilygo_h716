@@ -34,5 +34,6 @@ class FourToneImageDitherer {
  private:
   int width_ = 0;
   int row_ = 0;
+  int16_t* buffer_ = nullptr;
   int16_t* errorRows_[3][3] = {};
 };

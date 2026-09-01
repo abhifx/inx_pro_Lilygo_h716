@@ -10,3 +10,5 @@ build
 /compile_commands.json
 /.cache
 /fs_
+.artifacts/
+*.artifact.md

@@ -24,7 +24,7 @@ bool isSupportedBook(const char* name) {
   std::transform(value.begin(), value.end(), value.begin(), [](const unsigned char c) {
     return static_cast<char>(std::tolower(c));
   });
-  constexpr const char* extensions[] = {".epub", ".txt", ".md", ".xtc", ".xtch", ".pdf"};
+  constexpr const char* extensions[] = {".epub", ".txt", ".md", ".xtc", ".xtch", ".pdf", ".mobi"};
   for (const char* extension : extensions) {
     const size_t length = strlen(extension);
     if (value.size() >= length && value.compare(value.size() - length, length, extension) == 0) return true;

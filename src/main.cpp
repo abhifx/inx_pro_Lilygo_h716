@@ -13,6 +13,9 @@
 #if FREEINK_DEVICE_X4PRO
 #include <XteinkDetect.h>
 #endif
+#if FREEINK_DEVICE_LILYGO
+#include "EPD_Painter_Adafruit.h"
+#endif
 #ifndef SIMULATOR
 #include <esp_system.h>
 #endif
@@ -384,7 +387,19 @@ bool handleGlobalPowerRefresh() {
  */
 void setup() {
   t1 = millis();
+
+  // Initialize Serial early to capture boot logs
+  INX_SERIAL.begin(115200);
+  unsigned long start = millis();
+  while (!INX_SERIAL && (millis() - start) < 1000) delay(1);
+  INX_SERIAL.println("[BOOT] Starting inx-pro...");
+
   gpio.begin();
+
+#if FREEINK_DEVICE_LILYGO
+  // Ensure we call any special LilyGo initialization if needed,
+  // but Painter.begin() handles most of it.
+#endif
 
 #if FREEINK_DEVICE_X4PRO
   // X4 Pro batches can carry SSD1677, UC8179, or UC8279 panels. Resolve the
@@ -394,7 +409,6 @@ void setup() {
 #endif
 
   sdCardAvailable = SdMan.begin();
-
 
   setupDisplayAndFonts();
 
@@ -418,6 +432,7 @@ void setup() {
     }
 #endif
   }
+/*
   switch (gpio.getWakeupReason()) {
     case HalGPIO::WakeupReason::PowerButton:
       verifyPowerButtonDuration();
@@ -428,9 +443,10 @@ void setup() {
     default:
       break;
   }
+*/
 
   switchTo<BootActivity>(render, input);
-  waitForPowerRelease();
+  // waitForPowerRelease();
 }
 
 /**

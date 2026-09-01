@@ -28,7 +28,7 @@ ScreenComponents::LoadingProgressLayout layout{};
 volatile int current = 0;
 volatile int total = 0;
 int displayedProgress = -1;
-constexpr uint32_t stackSize = 16384;
+constexpr uint32_t stackSize = 32768;
 
 void clearFrame() {
   free(frame);

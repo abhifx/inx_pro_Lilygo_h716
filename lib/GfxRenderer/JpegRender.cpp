@@ -228,32 +228,32 @@ inline uint8_t grayFromRgb(uint8_t r, uint8_t g, uint8_t b) {
 constexpr int kJpegDitherSolidBlackMax = 20;
 constexpr int kJpegDitherSolidWhiteMin = 255;    // Changed from 255 - more light grays
 constexpr int kJpegTwoBitSolidBlackMax = 10;     // Snap dark tones to clean black instead of dithering them to gray
-constexpr int kJpegTwoBitSolidWhiteMin = 224;    // Keep upper mids from blowing out to white too early
-constexpr int kJpegTwoBitContrastPercent = 120;  // Keep medium shadows from collapsing into one dark-gray slab
+constexpr int kJpegTwoBitSolidWhiteMin = 252;    // Preserve light grays up to 251
+constexpr int kJpegTwoBitContrastPercent = 105;  // Natural contrast, no artificial brightening
 constexpr int kJpegTwoBitSharpenThreshold = 18;
 constexpr int kJpegTwoBitSharpenPercent = 80;
 constexpr int kJpegTwoBitSharpenMax = 130;
 constexpr int kJpegTwoBitEdgeThreshold = 0;
 constexpr int kJpegTwoBitEdgeMaxDarken = 0;       // Reduced from 36
 constexpr int kJpegTwoBitHighlightThreshold = 5;  // Reduced from 8 - detect more highlights
-constexpr int kJpegTwoBitHighlightMaxLift = 50;   // Reduced from 100 - less over-lifting
+constexpr int kJpegTwoBitHighlightMaxLift = 0;    // No artificial highlight over-lifting
 constexpr int kJpegTwoBitShadowStart = 1;         // Increased from 10
 constexpr int kJpegTwoBitShadowMaxDarken = 0;     // Keep at 0 (already is)
 constexpr int kJpegTwoBitShadowTextureLiftMin = 42;
 constexpr int kJpegTwoBitShadowTextureLiftMax = 126;
-constexpr int kJpegTwoBitShadowTextureLift = 10;
+constexpr int kJpegTwoBitShadowTextureLift = 0;
 constexpr int kJpegTwoBitMidtoneLiftMin = 96;
 constexpr int kJpegTwoBitMidtoneLiftMax = 184;
-constexpr int kJpegTwoBitMidtoneLift = 8;
+constexpr int kJpegTwoBitMidtoneLift = 0;
 constexpr int kJpegTwoBitFlatShadowTextureLift = 4;
 constexpr int kJpegTwoBitMediumMixStart = 96;
 constexpr int kJpegTwoBitMediumMixFull = 148;
 constexpr int kJpegTwoBitMediumMixDetailMin = 2;
 constexpr int kJpegTwoBitMediumMixDetailFull = 28;
 constexpr int kJpegTwoBitQualitySolidBlackMax = 12;
-constexpr int kJpegTwoBitQualitySolidWhiteMin = 218;
-constexpr int kJpegTwoBitQualityContrastPercent = 162;
-constexpr int kJpegTwoBitQualityShadowContrastPercent = 122;
+constexpr int kJpegTwoBitQualitySolidWhiteMin = 252;
+constexpr int kJpegTwoBitQualityContrastPercent = 110;
+constexpr int kJpegTwoBitQualityShadowContrastPercent = 105;
 constexpr int kJpegTwoBitQualitySharpenThreshold = 3;
 constexpr int kJpegTwoBitQualitySharpenPercent = 105;
 constexpr int kJpegTwoBitQualitySharpenMax = 38;
@@ -342,7 +342,7 @@ int jpegQualityToneCommon(const int gray, const int leftGray, const int rightGra
   if (tone <= 8) {
     return 0;
   }
-  if (tone >= 238) {
+  if (tone >= 252) {
     return 255;
   }
 
@@ -394,33 +394,32 @@ int quantizeGray(const int corrected, const ImageRenderMode mode) {
   return corrected < 128 ? 0 : 255;
 }
 
+}  // namespace
+
 // Two-bit-mode plane decision from an already-resolved dither level (0-3). Split out from
 // drawQuantizedPixel() so a captured/replayed render (which stores level directly - see
 // JpegLevelCapture) doesn't have to redo the q->level conversion.
 void drawPixelForLevel(const GfxRenderer& renderer, const int x, const int y, const uint8_t level) {
-  const GfxRenderer::RenderMode renderMode = renderer.getRenderMode();
+  GfxRenderer::RenderMode renderMode = renderer.getRenderMode();
+  if (renderMode == GfxRenderer::GRAY2_LSB) {
+    renderMode = GfxRenderer::GRAYSCALE_LSB;
+  } else if (renderMode == GfxRenderer::GRAY2_MSB) {
+    renderMode = GfxRenderer::GRAYSCALE_MSB;
+  }
+
   const uint8_t grayscaleCode = grayscaleCodeTable()[level & 3];
   if (renderMode == GfxRenderer::BW) {
     if (level > 0) {
       renderer.drawPixel(x, y, true);
     }
   } else if (renderMode == GfxRenderer::GRAYSCALE_MSB && ((grayscaleCode & 0b10) != 0)) {
-    renderer.drawPixel(x, y, false);
+    renderer.drawPixel(x, y, true);
   } else if (renderMode == GfxRenderer::GRAYSCALE_LSB && ((grayscaleCode & 0b01) != 0)) {
-    renderer.drawPixel(x, y, false);
-  } else if (renderMode == GfxRenderer::GRAY2_LSB || renderMode == GfxRenderer::GRAY2_MSB) {
-    // UC8179 stores the INVERSE of the mask bit, so it draws when the bit is 1. Every other
-    // panel stores it directly and draws when the bit is 0 - which is what this did before the
-    // flip. Guarded so only UC8179 takes the inverted branch.
-    const uint8_t bit = (renderMode == GfxRenderer::GRAY2_LSB) ? 0b01 : 0b10;
-    const bool bitSet = (mapQualityGray2Level(level) & bit) != 0;
-    const bool invert =
-        BoardConfig::ACTIVE.displayController == BoardConfig::DisplayController::UC8179;
-    if (bitSet == invert) {
-      renderer.drawPixel(x, y, true);
-    }
+    renderer.drawPixel(x, y, true);
   }
 }
+
+namespace {
 
 void drawQuantizedPixel(const GfxRenderer& renderer, const int x, const int y, const int q,
                         const ImageRenderMode mode) {

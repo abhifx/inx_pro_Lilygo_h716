@@ -825,7 +825,7 @@ void XtcReaderActivity::renderPage() {
       pagesUntilFullRefresh--;
     }
 
-    renderer.clearScreen(0x00);
+    renderer.clearScreen(0xFF);
     for (uint16_t y = 0; y < pageHeight; y++) {
       for (uint16_t x = 0; x < pageWidth; x++) {
         if (getPixelValue(x, y) == 1) {
@@ -835,7 +835,7 @@ void XtcReaderActivity::renderPage() {
     }
     renderer.copyGrayscaleLsbBuffers();
 
-    renderer.clearScreen(0x00);
+    renderer.clearScreen(0xFF);
     for (uint16_t y = 0; y < pageHeight; y++) {
       for (uint16_t x = 0; x < pageWidth; x++) {
         const uint8_t pv = getPixelValue(x, y);

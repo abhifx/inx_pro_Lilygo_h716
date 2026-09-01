@@ -11,25 +11,13 @@
 namespace {
 int clamp255(const int v) { return std::max(0, std::min(255, v)); }
 
-constexpr int kCleanPaperMin = 248;
+constexpr int kCleanPaperMin = 252;
 
 // Amplitude of the ordered lattice that breaks Floyd-Steinberg "worm" lines on flat gray areas.
 // Larger = more texture breakup (but more visible dither); 0 = pure FS (worms return).
 constexpr int kGrayscaleMicroDither = 20;
 
 int perceptualTone(const int gray) {
-  if (gray < 24) {
-    return gray;
-  }
-  if (gray < 96) {
-    return clamp255(gray + 18);
-  }
-  if (gray < 180) {
-    return clamp255(gray + 24);
-  }
-  if (gray < 236) {
-    return clamp255(gray + 22);
-  }
   return clamp255(gray);
 }
 
@@ -40,47 +28,35 @@ FourToneImageDitherer::FourToneImageDitherer(const int width) : width_(width) {
     width_ = 0;
     return;
   }
+  const size_t rowElems = static_cast<size_t>(width_) + 4u;
+  const size_t totalElems = 9u * rowElems;
+  buffer_ = static_cast<int16_t*>(std::calloc(totalElems, sizeof(int16_t)));
+  if (!buffer_) {
+    width_ = 0;
+    return;
+  }
   for (int plane = 0; plane < 3; plane++) {
     for (int row = 0; row < 3; row++) {
-      errorRows_[plane][row] = static_cast<int16_t*>(std::calloc(static_cast<size_t>(width_) + 4u, sizeof(int16_t)));
+      errorRows_[plane][row] = buffer_ + (plane * 3 + row) * rowElems;
     }
-  }
-  if (!ok()) {
-    for (int plane = 0; plane < 3; plane++) {
-      for (int row = 0; row < 3; row++) {
-        std::free(errorRows_[plane][row]);
-        errorRows_[plane][row] = nullptr;
-      }
-    }
-    width_ = 0;
   }
 }
 
 FourToneImageDitherer::~FourToneImageDitherer() {
-  for (int plane = 0; plane < 3; plane++) {
-    for (int row = 0; row < 3; row++) {
-      std::free(errorRows_[plane][row]);
-    }
-  }
+  std::free(buffer_);
 }
 
 bool FourToneImageDitherer::ok() const {
-  if (width_ <= 0) return false;
-  for (int plane = 0; plane < 3; plane++) {
-    for (int row = 0; row < 3; row++) {
-      if (!errorRows_[plane][row]) return false;
-    }
-  }
-  return true;
+  return width_ > 0 && buffer_ != nullptr;
 }
 
 ImageToneSample FourToneImageDitherer::quantize(const int gray) {
   const int g = clamp255(gray);
   ImageToneSample sample;
-  if (g < 20) {
+  if (g < 42) {
     sample.level = 3;
     sample.value = 0;
-  } else if (g < 158) {
+  } else if (g < 128) {
     sample.level = 1;
     sample.value = 85;
   } else if (g < kCleanPaperMin) {
@@ -94,9 +70,9 @@ ImageToneSample FourToneImageDitherer::quantize(const int gray) {
 }
 
 uint8_t FourToneImageDitherer::levelFromValue(const int value) {
-  if (value <= 36) return 3;
-  if (value <= 166) return 1;
-  if (value <= 236) return 2;
+  if (value <= 42) return 3;
+  if (value <= 128) return 1;
+  if (value <= 251) return 2;
   return 0;
 }
 

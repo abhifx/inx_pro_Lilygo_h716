@@ -42,6 +42,16 @@ std::string lower(const std::string& value) {
   return out;
 }
 
+bool caseInsensitiveLess(const std::string& a, const std::string& b) {
+  const size_t len = std::min(a.size(), b.size());
+  for (size_t i = 0; i < len; ++i) {
+    const unsigned char ca = static_cast<unsigned char>(std::tolower(static_cast<unsigned char>(a[i])));
+    const unsigned char cb = static_cast<unsigned char>(std::tolower(static_cast<unsigned char>(b[i])));
+    if (ca != cb) return ca < cb;
+  }
+  return a.size() < b.size();
+}
+
 int matchScore(const std::string& query, const LibraryIndex::Book& book) {
   if (query.empty()) return 0;
 
@@ -323,7 +333,8 @@ int LibraryIndex::countBooks(FsFile& dir, const int depth) {
       const char* extension = strrchr(name, '.');
       if (extension && (strcasecmp(extension, ".epub") == 0 || strcasecmp(extension, ".txt") == 0 ||
                         strcasecmp(extension, ".md") == 0 || strcasecmp(extension, ".xtc") == 0 ||
-                        strcasecmp(extension, ".xtch") == 0 || strcasecmp(extension, ".pdf") == 0)) {
+                        strcasecmp(extension, ".xtch") == 0 || strcasecmp(extension, ".pdf") == 0 ||
+                        strcasecmp(extension, ".mobi") == 0)) {
         ++count;
       }
     }
@@ -355,18 +366,11 @@ void LibraryIndex::indexAll(const std::function<void(int, int, const char*)>& pr
     root.close();
   }
 
-  if (totalBooks == 0) {
-    if (progress) {
-      progress(0, 0, "No books found");
-    }
-    return;
-  }
-
   if (progress) {
     progress(0, totalBooks, "");
   }
 
-  FsFile index = SdMan.open(indexPath, O_WRITE | O_CREAT | O_TRUNC);
+  FsFile index = SdMan.open(indexPath, O_RDWR | O_CREAT | O_TRUNC);
   if (!index) {
     if (progress) {
       progress(0, 0, "Failed to create index");
@@ -378,19 +382,23 @@ void LibraryIndex::indexAll(const std::function<void(int, int, const char*)>& pr
   uint8_t version = indexVersion;
   index.write(&version, 1);
 
-  root = SdMan.open("/");
-  if (root) {
-    int currentBook = 0;
-    indexDirectory(root, index, currentBook, totalBooks, progress, std::string("/"), 0);
-    root.close();
+  if (totalBooks > 0) {
+    root = SdMan.open("/");
+    if (root) {
+      int currentBook = 0;
+      indexDirectory(root, index, currentBook, totalBooks, progress, std::string("/"), 0);
+      root.close();
+    }
   }
 
   index.close();
-  if (!buildSearchIndex()) {
-    INX_SERIAL.printf("[LIBRARY] Search index unavailable; using library.idx scan\n");
+  if (totalBooks > 0) {
+    if (!buildSearchIndex()) {
+      INX_SERIAL.printf("[LIBRARY] Search index unavailable; using library.idx scan\n");
+    }
   }
   if (progress) {
-    progress(totalBooks, totalBooks, "Indexing complete!");
+    progress(totalBooks, totalBooks, totalBooks > 0 ? "Indexing complete!" : "No books found");
   }
 }
 
@@ -433,7 +441,7 @@ bool LibraryIndex::search(const std::string& query, std::vector<Book>& results, 
     file.close();
 
     std::sort(results.begin(), results.end(), [](const Book& left, const Book& right) {
-      return lower(left.title) < lower(right.title);
+      return caseInsensitiveLess(left.title, right.title);
     });
     if (results.size() > limit) {
       results.resize(limit);
@@ -478,7 +486,7 @@ bool LibraryIndex::search(const std::string& query, std::vector<Book>& results, 
 
   std::sort(matches.begin(), matches.end(), [](const Match& left, const Match& right) {
     if (left.score != right.score) return left.score < right.score;
-    return lower(left.book.title) < lower(right.book.title);
+    return caseInsensitiveLess(left.book.title, right.book.title);
   });
 
   const size_t count = std::min(limit, matches.size());
@@ -546,7 +554,8 @@ void LibraryIndex::indexDirectory(FsFile& dir, FsFile& index, int& currentBook, 
       const char* extension = strrchr(name, '.');
       if (extension && (strcasecmp(extension, ".epub") == 0 || strcasecmp(extension, ".txt") == 0 ||
                         strcasecmp(extension, ".md") == 0 || strcasecmp(extension, ".xtc") == 0 ||
-                        strcasecmp(extension, ".xtch") == 0 || strcasecmp(extension, ".pdf") == 0)) {
+                        strcasecmp(extension, ".xtch") == 0 || strcasecmp(extension, ".pdf") == 0 ||
+                        strcasecmp(extension, ".mobi") == 0)) {
         uint8_t bookMarker = 0x01;
         index.write(&bookMarker, 1);
 

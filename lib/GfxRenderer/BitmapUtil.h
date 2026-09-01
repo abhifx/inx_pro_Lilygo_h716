@@ -11,6 +11,7 @@
 #include "ImageToneDither.h"
 
 class Print;
+class GfxRenderer;
 
 struct BmpHeader;
 
@@ -19,6 +20,7 @@ uint8_t quantizeSimple(int gray);
 ImageToneSample quantizeTwoBitImage(int gray);
 uint8_t adjustTwoBitImageLevelForDisplay(uint8_t level);
 uint8_t mapQualityGray2Level(uint8_t level);
+void drawPixelForLevel(const GfxRenderer& renderer, int x, int y, uint8_t level);
 
 /**
  * Image tone -> 2-bit plane code for the MEDIUM (GRAYSCALE_LSB/MSB) path, indexed by
