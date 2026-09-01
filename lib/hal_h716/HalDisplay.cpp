@@ -100,8 +100,8 @@ void HalDisplay::displayBuffer(RefreshMode mode) {
         return;
     }
 
-    if (mode == HalDisplay::MANUAL_REFRESH || mode == HalDisplay::FULL_REFRESH) {
-        painter.clear(); // Hardware erase to white for full/manual page refresh
+    if (mode == HalDisplay::MANUAL_REFRESH || mode == HalDisplay::FULL_REFRESH || mode == HalDisplay::HALF_REFRESH) {
+        painter.clear(); // Hardware erase to white to eliminate all ghosting
     }
 
     uint64_t* canvas64 = (uint64_t*)canvas;
