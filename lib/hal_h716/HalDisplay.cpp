@@ -154,8 +154,6 @@ void HalDisplay::cleanupGrayscaleBuffers(const uint8_t* bwBuffer) {
 void HalDisplay::displayGrayBuffer(bool quality, bool trackForRevert) {
     if (!_lsbBuffer || !_msbBuffer) return;
 
-    painter.clear(); // Hardware clear to eliminate ghosting from previous 1bpp content
-
     uint8_t* canvas = painter.getBuffer();
     if (!canvas) return;
 
