@@ -369,7 +369,7 @@ bool ImageRender::displayGrayscale(int x, int y, int width, int height, const Op
       renderer_.renderGrayscalePasses(
           effectiveQuality, /*preserveText=*/false,
           [&] {
-            renderer_.clearScreen(effectiveQuality ? 0xFF : 0x00);
+            renderer_.clearScreen(0xFF);
             render(x, y, width, height, renderOpt, &capture);
             captureCurrentPlane();
             if (overlay) {
