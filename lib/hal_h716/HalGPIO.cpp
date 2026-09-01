@@ -128,13 +128,15 @@ int HalGPIO::getBatteryPercentage() const {
 
     static const BatteryMonitor battery;
     uint16_t percent = 0;
-    if (battery.readPercentageChecked(percent)) {
+    if (battery.readPercentageChecked(percent) && percent > 0) {
         batteryCachedPercent = percent;
     } else {
-        double volts = battery.readVolts();
-        if (volts > 2.5) {
-            uint16_t mv = static_cast<uint16_t>(volts * 1000.0);
-            batteryCachedPercent = BatteryMonitor::percentageFromMillivolts(mv);
+        const uint16_t pinMv = analogReadMilliVolts(H716_BATTERY_ADC);
+        const uint16_t batMv = pinMv * 2;
+        if (batMv > 2800) {
+            batteryCachedPercent = BatteryMonitor::percentageFromMillivolts(batMv);
+        } else {
+            batteryCachedPercent = 100;
         }
     }
     batteryLastPollMs = now;
