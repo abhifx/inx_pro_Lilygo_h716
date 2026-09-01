@@ -113,6 +113,7 @@ void HalDisplay::displayBuffer(RefreshMode mode) {
         canvas64[i] = lutBW[src[i]];
     }
 
+    painter.setQuality(EPD_Painter::Quality::QUALITY_NORMAL);
     painter.paint();
 }
 
@@ -174,7 +175,7 @@ void HalDisplay::displayGrayBuffer(bool quality, bool trackForRevert) {
         }
     }
 
-    painter.setQuality(quality ? EPD_Painter::Quality::QUALITY_HIGH : EPD_Painter::Quality::QUALITY_NORMAL);
+    painter.setQuality(EPD_Painter::Quality::QUALITY_NORMAL);
     painter.paint();
 }
 
