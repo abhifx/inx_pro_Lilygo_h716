@@ -534,6 +534,26 @@ void SettingsDrawer::setupMenu() {
       menuItems.push_back(darkModeEntry);
     }
 
+    MenuEntry ditherEntry;
+    ditherEntry.item = MenuItem::ReaderImageGrayscale;
+    ditherEntry.group = GroupType::CONTROLS;
+    ditherEntry.name = "Image Dithering";
+    ditherEntry.getValueText = [](const BookSettings&) -> const char* {
+      switch (READER_SETTINGS.readerImageGrayscale) {
+        case SystemSetting::READER_IMAGE_LOW: return "Disabled";
+        case SystemSetting::READER_IMAGE_MEDIUM: return "Fast 2-Bit";
+        case SystemSetting::READER_IMAGE_HIGH: return "High Quality";
+        default: return "Disabled";
+      }
+    };
+    ditherEntry.change = [](BookSettings&, int delta) {
+      int newVal = static_cast<int>(READER_SETTINGS.readerImageGrayscale) + delta;
+      if (newVal >= 0 && newVal < SystemSetting::READER_IMAGE_QUALITY_COUNT) {
+        READER_SETTINGS.readerImageGrayscale = static_cast<uint8_t>(newVal);
+      }
+    };
+    menuItems.push_back(ditherEntry);
+
     MenuEntry guideLinesEntry;
     guideLinesEntry.item = MenuItem::ReadingGuideLines;
     guideLinesEntry.group = GroupType::CONTROLS;

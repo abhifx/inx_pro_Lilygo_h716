@@ -100,6 +100,10 @@ void HalDisplay::displayBuffer(RefreshMode mode) {
         return;
     }
 
+    if (mode == HalDisplay::MANUAL_REFRESH || mode == HalDisplay::FULL_REFRESH) {
+        painter.clear(); // Hardware erase to white for full/manual page refresh
+    }
+
     uint64_t* canvas64 = (uint64_t*)canvas;
     const uint8_t* src = _bwBuffer;
     uint32_t i = 0;
