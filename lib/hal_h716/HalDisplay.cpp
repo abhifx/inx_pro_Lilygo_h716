@@ -100,8 +100,28 @@ void HalDisplay::displayBuffer(RefreshMode mode) {
         return;
     }
 
-    if (mode == HalDisplay::MANUAL_REFRESH || mode == HalDisplay::FULL_REFRESH || mode == HalDisplay::HALF_REFRESH) {
-        painter.clear(); // Hardware erase to white to eliminate all ghosting
+    static uint16_t consecutiveFastRefreshes = 0;
+
+    bool doHardwareClear = (mode == HalDisplay::MANUAL_REFRESH ||
+                            mode == HalDisplay::FULL_REFRESH ||
+                            mode == HalDisplay::HALF_REFRESH ||
+                            mode == HalDisplay::STRONG_FAST_REFRESH);
+
+    if (mode == HalDisplay::FAST_REFRESH) {
+        consecutiveFastRefreshes++;
+        if (consecutiveFastRefreshes >= 6) {
+            doHardwareClear = true;
+            consecutiveFastRefreshes = 0;
+        }
+    } else {
+        consecutiveFastRefreshes = 0;
+    }
+
+    if (doHardwareClear) {
+        painter.clear(); // Erase residual charge to keep background pure white & UI text pitch-black
+        painter.setQuality(EPD_Painter::Quality::QUALITY_HIGH);
+    } else {
+        painter.setQuality(EPD_Painter::Quality::QUALITY_NORMAL);
     }
 
     uint64_t* canvas64 = (uint64_t*)canvas;
@@ -117,7 +137,6 @@ void HalDisplay::displayBuffer(RefreshMode mode) {
         canvas64[i] = lutBW[src[i]];
     }
 
-    painter.setQuality(EPD_Painter::Quality::QUALITY_NORMAL);
     painter.paint();
 }
 
@@ -133,6 +152,7 @@ void HalDisplay::syncWriteBufferFromActive() const {
 }
 
 void HalDisplay::deepSleep() {
+    painter.end();
 }
 
 uint8_t* HalDisplay::getFrameBuffer() const {

@@ -4,8 +4,10 @@
 #include <BatteryMonitor.h>
 #include <BoardConfig.h>
 #include <Rtc.h>
+#include <WiFi.h>
 #include <esp_sleep.h>
 #include <esp_system.h>
+#include <driver/rtc_io.h>
 #include <cmath>
 #include <ctime>
 
@@ -41,28 +43,24 @@ void HalGPIO::serviceTouchGestures() {
         return;
     }
 
-    float nativeSx = 0.0f, nativeSy = 0.0f, nativeEx = 0.0f, nativeEy = 0.0f;
-    if (inputMgr.wasSwipe(nativeSx, nativeSy, nativeEx, nativeEy)) {
-        float screenSx = 0.0f, screenSy = 0.0f;
-        float screenEx = 0.0f, screenEy = 0.0f;
+    float sx = 0.0f, sy = 0.0f, ex = 0.0f, ey = 0.0f;
+    if (inputMgr.wasSwipe(sx, sy, ex, ey)) {
+        touchSwipeStartNx = sx;
+        touchSwipeStartNy = sy;
 
-        inx::touch::nativeToScreen(GfxRenderer::Orientation::Portrait, nativeSx, nativeSy, screenSx, screenSy);
-        inx::touch::nativeToScreen(GfxRenderer::Orientation::Portrait, nativeEx, nativeEy, screenEx, screenEy);
-
-        touchSwipeStartNx = screenSx;
-        touchSwipeStartNy = screenSy;
-
-        const float dx = screenEx - screenSx;
-        const float dy = screenEy - screenSy;
+        const float dx = ex - sx;
+        const float dy = ey - sy;
 
         constexpr float kMinSwipeDistance = 0.05f;
 
         if (std::fabs(dx) >= kMinSwipeDistance || std::fabs(dy) >= kMinSwipeDistance) {
+            TouchSwipe nativeDirection = TouchSwipe::None;
             if (std::fabs(dy) > std::fabs(dx)) {
-                touchSwipeDirection = (dy < 0.0f) ? TouchSwipe::Up : TouchSwipe::Down;
+                nativeDirection = (dy < 0.0f) ? TouchSwipe::Up : TouchSwipe::Down;
             } else {
-                touchSwipeDirection = (dx < 0.0f) ? TouchSwipe::Left : TouchSwipe::Right;
+                nativeDirection = (dx < 0.0f) ? TouchSwipe::Left : TouchSwipe::Right;
             }
+            touchSwipeDirection = inx::touch::toDefaultOrientation(nativeDirection);
         }
     }
 }
@@ -117,6 +115,31 @@ HalGPIO::MotionGesture HalGPIO::readMotionGesture(uint8_t orientation, uint8_t m
 }
 
 void HalGPIO::startDeepSleep() {
+    // 1. Wait for power button release so we don't instantly wake from the press that put us to sleep
+    const auto pwrPin = static_cast<gpio_num_t>(H716_BUTTON_PIN);
+    pinMode(H716_BUTTON_PIN, INPUT_PULLUP);
+    while (digitalRead(H716_BUTTON_PIN) == LOW) {
+        delay(50);
+    }
+
+    // 2. Shut down radios
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+    btStop();
+
+    // 3. Ensure RTC GPIO pullup is enabled during deep sleep so GPIO 21 does not float low
+    if (rtc_gpio_is_valid_gpio(pwrPin)) {
+        rtc_gpio_init(pwrPin);
+        rtc_gpio_set_direction(pwrPin, RTC_GPIO_MODE_INPUT_ONLY);
+        rtc_gpio_pullup_en(pwrPin);
+        rtc_gpio_pulldown_dis(pwrPin);
+    }
+
+    // 4. Configure power button ext1 deep sleep wakeup
+    const uint64_t wakeMask = 1ULL << H716_BUTTON_PIN;
+    esp_sleep_enable_ext1_wakeup(wakeMask, ESP_EXT1_WAKEUP_ANY_LOW);
+
+    // 5. Enter deep sleep
     esp_deep_sleep_start();
 }
 
@@ -131,7 +154,11 @@ int HalGPIO::getBatteryPercentage() const {
     if (battery.readPercentageChecked(percent) && percent > 0) {
         batteryCachedPercent = percent;
     } else {
-        const uint16_t pinMv = analogReadMilliVolts(H716_BATTERY_ADC);
+        uint32_t mvSum = 0;
+        for (int i = 0; i < 4; ++i) {
+            mvSum += analogReadMilliVolts(H716_BATTERY_ADC);
+        }
+        const uint16_t pinMv = static_cast<uint16_t>(mvSum / 4);
         const uint16_t batMv = pinMv * 2;
         if (batMv > 2800) {
             batteryCachedPercent = BatteryMonitor::percentageFromMillivolts(batMv);

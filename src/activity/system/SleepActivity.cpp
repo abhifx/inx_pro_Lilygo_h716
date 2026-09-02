@@ -49,8 +49,8 @@ bool isSupportedSleepImageFile(const std::string& filename) {
 }
 
 bool sleepTwoBitEnabled() {
-  return SETTINGS.sleepImageQuality != SystemSetting::SLEEP_IMAGE_LOW &&
-         SETTINGS.sleepScreenCoverFilter == SystemSetting::SLEEP_SCREEN_COVER_FILTER::NO_FILTER;
+  // Sleep screen dithering / 2-bit passes disabled to ensure clean, sharp, non-fading 1-bit rendering
+  return false;
 }
 
 bool sleepImageQualityEnabled() { return SETTINGS.sleepImageQuality == SystemSetting::SLEEP_IMAGE_HIGH; }
@@ -282,6 +282,19 @@ std::string resolveLastReadCoverPathForSleep(const std::string& path) {
   return coverPath;
 }
 
+class SleepImageRenderScope {
+ public:
+  explicit SleepImageRenderScope(GfxRenderer& renderer)
+      : renderer_(renderer), previous_(renderer.isImageRendering()) {
+    renderer_.setImageRendering(true);
+  }
+  ~SleepImageRenderScope() { renderer_.setImageRendering(previous_); }
+
+ private:
+  GfxRenderer& renderer_;
+  bool previous_;
+};
+
 }  // namespace
 
 /**
@@ -301,7 +314,16 @@ void SleepActivity::onEnter() {
 
   if (SETTINGS.sleepScreen != SystemSetting::SLEEP_SCREEN_MODE::TRANSPARENT && !renderDateTime &&
       SETTINGS.sleepScreen != SystemSetting::SLEEP_SCREEN_MODE::WIDGET) {
-    renderer.clearScreen(0Xff);
+    const bool isImageMode = SETTINGS.sleepScreen == SystemSetting::SLEEP_SCREEN_MODE::CUSTOM ||
+                             SETTINGS.sleepScreen == SystemSetting::SLEEP_SCREEN_MODE::COVER;
+    const bool prevImageRendering = renderer.isImageRendering();
+    if (isImageMode) {
+      renderer.setImageRendering(true);
+    }
+    renderer.clearScreen(0xFF);
+    if (isImageMode) {
+      renderer.setImageRendering(prevImageRendering);
+    }
     // Home can leave a dark differential frame in the panel. The quality sleep
     // pass is absolute, but it still needs this clean white base when entering
     // from a normal B/W screen.
@@ -344,6 +366,7 @@ void SleepActivity::onEnter() {
  * and SD-root sleep.bmp/jpg/jpeg. Falls back to default sleep screen if no images are found.
  */
 void SleepActivity::renderCustomSleepScreen() const {
+  SleepImageRenderScope scope(renderer);
   const std::string imagePath = pickSleepBmpPath();
   if (!imagePath.empty()) {
     if (randomSleepImageEnabled()) {
@@ -390,6 +413,7 @@ void SleepActivity::renderCustomSleepScreen() const {
  * Displays a semi-transparent image overlay on top of the current screen content.
  */
 void SleepActivity::renderTransparentSleepScreen() const {
+  SleepImageRenderScope scope(renderer);
   const std::string imagePath = pickSleepBmpPath();
   if (!imagePath.empty()) {
     if (randomSleepImageEnabled()) {
@@ -435,6 +459,7 @@ void SleepActivity::renderTransparentSleepScreen() const {
  * (EPUB, XTC, or TXT format). Applies cropping or scaling based on settings.
  */
 void SleepActivity::renderCoverSleepScreen() const {
+  SleepImageRenderScope scope(renderer);
   if (APP_STATE.lastRead.empty()) {
     return renderCustomSleepScreen();
   }
@@ -476,6 +501,7 @@ void SleepActivity::renderCoverSleepScreen() const {
 }
 
 void SleepActivity::renderFill(const Bitmap& bitmap) const {
+  SleepImageRenderScope scope(renderer);
   const int pageWidth = renderer.getScreenWidth();
   const int pageHeight = renderer.getScreenHeight();
   float cropX = 0.0f;
@@ -544,6 +570,7 @@ void SleepActivity::renderFill(const Bitmap& bitmap) const {
 }
 
 void SleepActivity::renderBitmapSleepScreen(const Bitmap& bitmap, const bool preCroppedEpubCover) const {
+  SleepImageRenderScope scope(renderer);
   (void)preCroppedEpubCover;
 
   int x, y;

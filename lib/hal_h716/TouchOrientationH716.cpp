@@ -2,9 +2,10 @@
  * @file TouchOrientationH716.cpp
  * @brief LilyGo EPD47 H716 touch orientation transforms.
  *
- * The GT911 digitizer on the H716 is natively mounted in Landscape (960x540).
- * When running the app in Portrait mode (540x960), the touch coordinates must
- * be swapped and oriented to match the GfxRenderer coordinate system.
+ * The GT911 digitizer on the H716 is natively mounted in Landscape (960x540)
+ * with swapXY=true / rawMinX=0..959 / rawMinY=0..539.
+ * When running the app in Portrait mode (540x960), touch coordinates and swipe
+ * directions must be transformed to match the GfxRenderer coordinate system.
  */
 
 #include "TouchOrientation.h"
@@ -12,7 +13,17 @@
 namespace inx {
 namespace touch {
 
-HalGPIO::TouchSwipe toDefaultOrientation(const HalGPIO::TouchSwipe swipe) { return swipe; }
+// Raw panel swipe -> app default (portrait) frame. 90 degree rotation.
+HalGPIO::TouchSwipe toDefaultOrientation(const HalGPIO::TouchSwipe swipe) {
+  switch (swipe) {
+    case HalGPIO::TouchSwipe::Up: return HalGPIO::TouchSwipe::Right;
+    case HalGPIO::TouchSwipe::Down: return HalGPIO::TouchSwipe::Left;
+    case HalGPIO::TouchSwipe::Left: return HalGPIO::TouchSwipe::Up;
+    case HalGPIO::TouchSwipe::Right: return HalGPIO::TouchSwipe::Down;
+    case HalGPIO::TouchSwipe::None: return HalGPIO::TouchSwipe::None;
+  }
+  return HalGPIO::TouchSwipe::None;
+}
 
 HalGPIO::TouchSwipe forOrientation(const GfxRenderer::Orientation orientation, const HalGPIO::TouchSwipe swipe) {
   if (swipe == HalGPIO::TouchSwipe::None) return swipe;

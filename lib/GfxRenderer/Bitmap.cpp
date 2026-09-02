@@ -125,7 +125,7 @@ BmpReaderError Bitmap::parseHeaders() {
   rowBytes = (width * bpp + 31) / 32 * 4;
 
   for (int i = 0; i < 256; i++) paletteLum[i] = static_cast<uint8_t>(i);
-  if (colorsUsed > 0) {
+  if (colorsUsed > 0 && bfOffBits >= 54 + colorsUsed * 4) {
     for (uint32_t i = 0; i < colorsUsed; i++) {
       uint8_t rgb[4];
       file.read(rgb, 4);

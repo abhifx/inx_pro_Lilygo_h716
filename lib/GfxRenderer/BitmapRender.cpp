@@ -192,11 +192,25 @@ bool readIconBitMsbFirst(const uint8_t* bitmap, const int width, const int heigh
   const uint8_t byte = bitmap[sy * stride + sx / 8];
   return (byte & (0x80 >> (sx % 8))) != 0;
 }
+
+class ImageRenderScope {
+ public:
+  explicit ImageRenderScope(const GfxRenderer& gfx)
+      : gfx_(const_cast<GfxRenderer&>(gfx)), previous_(gfx.isImageRendering()) {
+    gfx_.setImageRendering(true);
+  }
+  ~ImageRenderScope() { gfx_.setImageRendering(previous_); }
+
+ private:
+  GfxRenderer& gfx_;
+  bool previous_;
+};
 }  // namespace
 
 void BitmapRender::render(const Bitmap& bitmap, const int x, const int y, const int maxWidth, const int maxHeight,
                           const float cropX, const float cropY, const RoundedOutside roundedOutside,
                           const ImageRenderMode mode, const float cropAnchorX) const {
+  ImageRenderScope scope(gfx);
   if (bitmap.is1Bit() && cropX == 0.0f && cropY == 0.0f) {
     oneBit(bitmap, x, y, maxWidth, maxHeight, roundedOutside);
     return;
@@ -381,6 +395,7 @@ void BitmapRender::render(const Bitmap& bitmap, const int x, const int y, const 
 
 void BitmapRender::oneBit(const Bitmap& bitmap, const int x, const int y, const int maxWidth, const int maxHeight,
                           const RoundedOutside roundedOutside) const {
+  ImageRenderScope scope(gfx);
   constexpr float kScaleEps = 1e-5f;
   constexpr float kHuge = 1e9f;
   float scale = 1.0f;
@@ -624,6 +639,7 @@ void BitmapRender::maskRoundedOutside(const int x, const int y, const int width,
 
 void BitmapRender::transparent(const Bitmap& bitmap, int x, int y, int maxWidth, int maxHeight,
                                uint8_t transparentStage, Orientation orientation) const {
+  ImageRenderScope scope(gfx);
   float scaleX = 1.0f;
   float scaleY = 1.0f;
 
@@ -704,6 +720,7 @@ namespace SleepScreenBitmap {
 
 static void renderBitmap1Bit(const GfxRenderer& gfx, const Bitmap& bitmap, const int x, const int y, const int maxWidth,
                              const int maxHeight) {
+  constexpr float kScaleEps = 1e-5f;
   float scale = 1.0f;
   bool isScaled = false;
   if (maxWidth > 0 && bitmap.getWidth() > maxWidth) {
@@ -714,6 +731,8 @@ static void renderBitmap1Bit(const GfxRenderer& gfx, const Bitmap& bitmap, const
     scale = std::min(scale, static_cast<float>(maxHeight) / static_cast<float>(bitmap.getHeight()));
     isScaled = true;
   }
+
+  const bool replicateUpscale = isScaled && scale > 1.0f + kScaleEps;
 
   const int outRowSize = (bitmap.getWidth() + 3) / 4;
   auto* outRow = static_cast<uint8_t*>(malloc(static_cast<size_t>(outRowSize)));
@@ -732,27 +751,39 @@ static void renderBitmap1Bit(const GfxRenderer& gfx, const Bitmap& bitmap, const
     }
 
     const int bmpYOffset = bitmap.isTopDown() ? bmpY : bitmap.getHeight() - 1 - bmpY;
-    int screenY = y + (isScaled ? static_cast<int>(std::floor(static_cast<float>(bmpYOffset) * scale)) : bmpYOffset);
-    if (screenY >= gfx.getScreenHeight()) {
-      continue;
-    }
-    if (screenY < 0) {
-      continue;
-    }
 
-    for (int bmpX = 0; bmpX < bitmap.getWidth(); bmpX++) {
-      int screenX = x + (isScaled ? static_cast<int>(std::floor(static_cast<float>(bmpX) * scale)) : bmpX);
-      if (screenX >= gfx.getScreenWidth()) {
-        break;
+    if (replicateUpscale) {
+      const int y0 = y + static_cast<int>(std::floor(static_cast<float>(bmpYOffset) * scale));
+      const int y1 = y + static_cast<int>(std::floor(static_cast<float>(bmpYOffset + 1) * scale));
+      if (y0 >= gfx.getScreenHeight()) continue;
+
+      for (int sy = y0; sy < y1 && sy < gfx.getScreenHeight(); ++sy) {
+        if (sy < 0) continue;
+        for (int bmpX = 0; bmpX < bitmap.getWidth(); bmpX++) {
+          const int x0 = x + static_cast<int>(std::floor(static_cast<float>(bmpX) * scale));
+          const int x1 = x + static_cast<int>(std::floor(static_cast<float>(bmpX + 1) * scale));
+          const uint8_t val = outRow[bmpX / 4] >> (6 - ((bmpX * 2) % 8)) & 0x3;
+          if (val == 1 || val == 3) {
+            for (int sx = x0; sx < x1 && sx < gfx.getScreenWidth(); ++sx) {
+              if (sx >= 0) gfx.drawPixel(sx, sy, true);
+            }
+          }
+        }
       }
-      if (screenX < 0) {
-        continue;
-      }
+    } else {
+      const int screenY = y + (isScaled ? static_cast<int>(std::floor(static_cast<float>(bmpYOffset) * scale)) : bmpYOffset);
+      if (screenY >= gfx.getScreenHeight() || screenY < 0) continue;
 
-      const uint8_t val = outRow[bmpX / 4] >> (6 - ((bmpX * 2) % 8)) & 0x3;
+      for (int bmpX = 0; bmpX < bitmap.getWidth(); bmpX++) {
+        const int screenX = x + (isScaled ? static_cast<int>(std::floor(static_cast<float>(bmpX) * scale)) : bmpX);
+        if (screenX >= gfx.getScreenWidth()) break;
+        if (screenX < 0) continue;
 
-      if (val == 1 || val == 3) {
-        gfx.drawPixel(screenX, screenY, true);
+        const uint8_t val = outRow[bmpX / 4] >> (6 - ((bmpX * 2) % 8)) & 0x3;
+
+        if (val == 1 || val == 3) {
+          gfx.drawPixel(screenX, screenY, true);
+        }
       }
     }
   }
@@ -766,6 +797,7 @@ static void renderBitmap1Bit(const GfxRenderer& gfx, const Bitmap& bitmap, const
 void BitmapRender::sleepScreen(const Bitmap& bitmap, const int x, const int y, const int maxWidth, const int maxHeight,
                                const float cropX, const float cropY, const bool coverFill,
                                const ImageRenderMode mode) const {
+  ImageRenderScope scope(gfx);
   if (mode == ImageRenderMode::OneBit && bitmap.is1Bit() && cropX == 0.0f && cropY == 0.0f) {
     SleepScreenBitmap::renderBitmap1Bit(gfx, bitmap, x, y, maxWidth, maxHeight);
     return;
