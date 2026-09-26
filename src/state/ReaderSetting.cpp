@@ -23,16 +23,13 @@
 #include "system/Fonts.h"
 #endif
 
-// Defined in SystemSetting.cpp; shared here rather than duplicated.
 void readAndValidate(FsFile& file, uint8_t& member, uint8_t maxValue);
 
 ReaderSetting ReaderSetting::instance;
 
 namespace {
 constexpr uint8_t READER_SETTINGS_FILE_VERSION = 1;
-// Must equal the exact number of fields written by saveToFile() and read by loadFromFile().
-constexpr uint8_t READER_SETTINGS_COUNT = 38;
-constexpr uint8_t LEGACY_IMAGE_PRESENTATION_COUNT = 4;
+constexpr uint8_t READER_SETTINGS_COUNT = 35;
 constexpr char READER_SETTINGS_FILE[] = "/.system/reader_settings.bin";
 constexpr uint32_t FNV1A_OFFSET = 2166136261UL;
 constexpr uint32_t FNV1A_PRIME = 16777619UL;
@@ -76,10 +73,6 @@ bool hashFile(const char* path, uint32_t& hash) {
   return true;
 }
 
-bool validRefreshFrequency(const uint8_t value) {
-  return value == 1 || value == 5 || value == 10 || value == 15 || value == 30;
-}
-
 uint32_t readerSettingsHash(const ReaderSetting& settings, const uint8_t fontFamilyToSave) {
   uint32_t hash = FNV1A_OFFSET;
   hashPod(hash, READER_SETTINGS_FILE_VERSION);
@@ -91,11 +84,6 @@ uint32_t readerSettingsHash(const ReaderSetting& settings, const uint8_t fontFam
   hashPod(hash, settings.statusBarFullStyle);
   hashPod(hash, settings.extraParagraphSpacing);
   hashPod(hash, settings.textAntiAliasing);
-  hashPod(hash, settings.readerShortPwrBtn);
-  hashPod(hash, settings.xtcShortPwrBtn);
-  hashPod(hash, settings.xtcPageAutoTurnSeconds);
-  hashPod(hash, settings.xtcImageQuality);
-  hashPod(hash, settings.xtcRefreshFrequency);
   hashString(hash, settings.dictionaryFolder);
   hashPod(hash, settings.btnPowerShortAction);
   hashPod(hash, settings.orientation);
@@ -113,8 +101,6 @@ uint32_t readerSettingsHash(const ReaderSetting& settings, const uint8_t fontFam
   hashPod(hash, settings.pageAutoTurnSeconds);
   hashPod(hash, settings.readerImageGrayscale);
   hashPod(hash, settings.readerSmartRefreshOnImages);
-  hashPod(hash, settings.legacyReaderImagePresentation);
-  hashPod(hash, settings.readerImageDither);
   hashPod(hash, settings.longPressChapterSkip);
   hashPod(hash, settings.quickActionsMask);
   hashPod(hash, settings.dailyReadingGoalMinutes);
@@ -122,9 +108,13 @@ uint32_t readerSettingsHash(const ReaderSetting& settings, const uint8_t fontFam
   hashPod(hash, settings.btnRightAction);
   hashPod(hash, settings.btnLeftLongAction);
   hashPod(hash, settings.btnRightLongAction);
+  hashPod(hash, settings.pageTurnMode);
+  hashPod(hash, settings.disableLightControl);
+  hashPod(hash, settings.doubleTapAction);
+  hashString(hash, settings.defaultLanguageCode);
   return hash;
 }
-}  // namespace
+}
 
 /**
  * @brief Saves all reader settings to file
@@ -137,17 +127,17 @@ bool ReaderSetting::saveToFile() const {
   if (fontFamilyToSave != fontFamily) {
     const_cast<ReaderSetting*>(this)->fontFamily = fontFamilyToSave;
   }
-#endif
-
-  {
-    ReaderSetting* mut = const_cast<ReaderSetting*>(this);
-    if (mut->xtcImageQuality >= SystemSetting::READER_IMAGE_QUALITY_COUNT) {
-      mut->xtcImageQuality = SystemSetting::READER_IMAGE_LOW;
+  ReaderSetting* mutableSettings = const_cast<ReaderSetting*>(this);
+  if (FontManager::isOutlineFontFamilySlot(fontFamilyToSave)) {
+    if (mutableSettings->fontSize < FontManager::OUTLINE_FONT_MIN_POINT_SIZE ||
+        mutableSettings->fontSize > FontManager::OUTLINE_FONT_MAX_POINT_SIZE) {
+      mutableSettings->fontSize = static_cast<uint8_t>(
+          FontManager::pointSizeForLegacyReaderSize(mutableSettings->fontSize));
     }
-    if (mut->xtcShortPwrBtn >= SystemSetting::XTC_SHORT_PWRBTN_COUNT) mut->xtcShortPwrBtn = SystemSetting::XTC_POWER_NEXT;
-    if (mut->xtcPageAutoTurnSeconds > 60 || mut->xtcPageAutoTurnSeconds % 10 != 0) mut->xtcPageAutoTurnSeconds = 0;
-    if (!validRefreshFrequency(mut->xtcRefreshFrequency)) mut->xtcRefreshFrequency = 15;
+  } else if (mutableSettings->fontSize >= SystemSetting::FONT_SIZE_COUNT) {
+    mutableSettings->fontSize = FontManager::legacyReaderSizeForPointSize(mutableSettings->fontSize);
   }
+#endif
 
   const uint32_t currentHash = readerSettingsHash(*this, fontFamilyToSave);
   uint32_t storedHash = 0;
@@ -171,11 +161,6 @@ bool ReaderSetting::saveToFile() const {
   serialization::writePod(outputFile, statusBarFullStyle);
   serialization::writePod(outputFile, extraParagraphSpacing);
   serialization::writePod(outputFile, textAntiAliasing);
-  serialization::writePod(outputFile, readerShortPwrBtn);
-  serialization::writePod(outputFile, xtcShortPwrBtn);
-  serialization::writePod(outputFile, xtcPageAutoTurnSeconds);
-  serialization::writePod(outputFile, xtcImageQuality);
-  serialization::writePod(outputFile, xtcRefreshFrequency);
   serialization::writeString(outputFile, std::string(dictionaryFolder));
   serialization::writePod(outputFile, btnPowerShortAction);
   serialization::writePod(outputFile, orientation);
@@ -192,8 +177,6 @@ bool ReaderSetting::saveToFile() const {
   serialization::writePod(outputFile, pageAutoTurnSeconds);
   serialization::writePod(outputFile, readerImageGrayscale);
   serialization::writePod(outputFile, readerSmartRefreshOnImages);
-  serialization::writePod(outputFile, legacyReaderImagePresentation);
-  serialization::writePod(outputFile, readerImageDither);
   serialization::writePod(outputFile, longPressChapterSkip);
   serialization::writePod(outputFile, readingGuideLinesEnabled);
   serialization::writePod(outputFile, quickActionsMask);
@@ -202,6 +185,10 @@ bool ReaderSetting::saveToFile() const {
   serialization::writePod(outputFile, btnRightAction);
   serialization::writePod(outputFile, btnLeftLongAction);
   serialization::writePod(outputFile, btnRightLongAction);
+  serialization::writePod(outputFile, pageTurnMode);
+  serialization::writePod(outputFile, disableLightControl);
+  serialization::writePod(outputFile, doubleTapAction);
+  serialization::writeString(outputFile, std::string(defaultLanguageCode));
 
   outputFile.close();
 
@@ -224,16 +211,25 @@ bool ReaderSetting::loadFromFile() {
   uint8_t version;
   serialization::readPod(inputFile, version);
 
-  if (version > READER_SETTINGS_FILE_VERSION) {
-    INX_SERIAL.printf("[%lu] [CPR] Deserialization failed: Unknown version %u (expected <= %u)\n", millis(), version,
-                  READER_SETTINGS_FILE_VERSION);
+  if (version != READER_SETTINGS_FILE_VERSION) {
+    INX_SERIAL.printf("[%lu] [CPR] Deserialization failed: Unsupported version %u (expected %u)\n", millis(), version,
+                      READER_SETTINGS_FILE_VERSION);
     inputFile.close();
+    SdMan.remove(READER_SETTINGS_FILE);
+    saveToFile();
     return false;
   }
 
   uint8_t fileSettingsCount = 0;
   serialization::readPod(inputFile, fileSettingsCount);
-  const bool shouldRewriteSettings = version < READER_SETTINGS_FILE_VERSION || fileSettingsCount < READER_SETTINGS_COUNT;
+  if (fileSettingsCount != READER_SETTINGS_COUNT) {
+    INX_SERIAL.printf("[%lu] [CPR] Deserialization failed: Expected %u settings, found %u\n", millis(),
+                      READER_SETTINGS_COUNT, fileSettingsCount);
+    inputFile.close();
+    SdMan.remove(READER_SETTINGS_FILE);
+    saveToFile();
+    return false;
+  }
   uint8_t settingsRead = 0;
 
   do {
@@ -256,23 +252,6 @@ bool ReaderSetting::loadFromFile() {
     if (++settingsRead >= fileSettingsCount) break;
 
     serialization::readPod(inputFile, textAntiAliasing);
-    if (++settingsRead >= fileSettingsCount) break;
-
-    readAndValidate(inputFile, readerShortPwrBtn, SystemSetting::READER_SHORT_PWRBTN_COUNT);
-    if (++settingsRead >= fileSettingsCount) break;
-
-    readAndValidate(inputFile, xtcShortPwrBtn, SystemSetting::XTC_SHORT_PWRBTN_COUNT);
-    if (++settingsRead >= fileSettingsCount) break;
-
-    serialization::readPod(inputFile, xtcPageAutoTurnSeconds);
-    if (xtcPageAutoTurnSeconds > 60 || xtcPageAutoTurnSeconds % 10 != 0) xtcPageAutoTurnSeconds = 0;
-    if (++settingsRead >= fileSettingsCount) break;
-
-    readAndValidate(inputFile, xtcImageQuality, SystemSetting::READER_IMAGE_QUALITY_COUNT);
-    if (++settingsRead >= fileSettingsCount) break;
-
-    serialization::readPod(inputFile, xtcRefreshFrequency);
-    if (!validRefreshFrequency(xtcRefreshFrequency)) xtcRefreshFrequency = 15;
     if (++settingsRead >= fileSettingsCount) break;
 
     {
@@ -299,7 +278,22 @@ bool ReaderSetting::loadFromFile() {
     }
     if (++settingsRead >= fileSettingsCount) break;
 
-    readAndValidate(inputFile, fontSize, SystemSetting::FONT_SIZE_COUNT);
+    serialization::readPod(inputFile, fontSize);
+#ifndef INX_SIMULATOR_WEB_ONLY
+    if (FontManager::isOutlineFontFamilySlot(fontFamily)) {
+      if (fontSize < FontManager::OUTLINE_FONT_MIN_POINT_SIZE ||
+          fontSize > FontManager::OUTLINE_FONT_MAX_POINT_SIZE) {
+        fontSize = static_cast<uint8_t>(FontManager::pointSizeForLegacyReaderSize(fontSize));
+      }
+    } else if (fontSize >= SystemSetting::FONT_SIZE_COUNT) {
+      // A settings file written while an outline family was selected can be
+      // reopened after that family is removed or replaced by a legacy .bin
+      // family. Convert the stored point size back to the legacy index.
+      fontSize = FontManager::legacyReaderSizeForPointSize(fontSize);
+    }
+#else
+    if (fontSize >= SystemSetting::FONT_SIZE_COUNT) fontSize = SystemSetting::SMALL;
+#endif
     if (++settingsRead >= fileSettingsCount) break;
 
     serialization::readPod(inputFile, lineHeight);
@@ -331,7 +325,7 @@ bool ReaderSetting::loadFromFile() {
     if (++settingsRead >= fileSettingsCount) break;
 
     serialization::readPod(inputFile, pageAutoTurnSeconds);
-    if (pageAutoTurnSeconds > 60 || pageAutoTurnSeconds % 10 != 0) pageAutoTurnSeconds = 0;
+    if (pageAutoTurnSeconds > 180 || pageAutoTurnSeconds % 10 != 0) pageAutoTurnSeconds = 0;
     if (++settingsRead >= fileSettingsCount) break;
 
     serialization::readPod(inputFile, readerImageGrayscale);
@@ -342,12 +336,6 @@ bool ReaderSetting::loadFromFile() {
 
     serialization::readPod(inputFile, readerSmartRefreshOnImages);
     if (readerSmartRefreshOnImages > 1) readerSmartRefreshOnImages = 1;
-    if (++settingsRead >= fileSettingsCount) break;
-
-    readAndValidate(inputFile, legacyReaderImagePresentation, LEGACY_IMAGE_PRESENTATION_COUNT);
-    if (++settingsRead >= fileSettingsCount) break;
-
-    readAndValidate(inputFile, readerImageDither, SystemSetting::READER_IMAGE_DITHER_COUNT);
     if (++settingsRead >= fileSettingsCount) break;
 
     serialization::readPod(inputFile, longPressChapterSkip);
@@ -379,28 +367,59 @@ bool ReaderSetting::loadFromFile() {
     readAndValidate(inputFile, btnRightLongAction, SystemSetting::READER_BUTTON_ACTION_COUNT);
     ++settingsRead;
 
+    if (settingsRead < fileSettingsCount) {
+      serialization::readPod(inputFile, pageTurnMode);
+      if (pageTurnMode > PAGE_TURN_TAP) pageTurnMode = PAGE_TURN_TAP;
+      ++settingsRead;
+    }
+    if (settingsRead < fileSettingsCount) {
+      serialization::readPod(inputFile, disableLightControl);
+      if (disableLightControl > 1) disableLightControl = 0;
+      ++settingsRead;
+    }
+    if (settingsRead < fileSettingsCount) {
+      readAndValidate(inputFile, doubleTapAction, SystemSetting::READER_BUTTON_ACTION_COUNT);
+      ++settingsRead;
+    }
+    if (settingsRead < fileSettingsCount) {
+      std::string languageCode;
+      serialization::readString(inputFile, languageCode);
+      if (languageCode.size() <= sizeof(defaultLanguageCode) - 1) {
+        std::strncpy(defaultLanguageCode, languageCode.c_str(), sizeof(defaultLanguageCode) - 1);
+        defaultLanguageCode[sizeof(defaultLanguageCode) - 1] = '\0';
+      } else {
+        defaultLanguageCode[0] = '\0';
+      }
+      ++settingsRead;
+    }
+
   } while (false);
 
   inputFile.close();
 
 #ifndef INX_SIMULATOR_WEB_ONLY
   FontManager::clampReaderFontFamilySlot(fontFamily);
+  if (FontManager::isOutlineFontFamilySlot(fontFamily)) {
+    if (fontSize < FontManager::OUTLINE_FONT_MIN_POINT_SIZE ||
+        fontSize > FontManager::OUTLINE_FONT_MAX_POINT_SIZE) {
+      fontSize = static_cast<uint8_t>(FontManager::pointSizeForLegacyReaderSize(fontSize));
+    }
+  } else if (fontSize >= SystemSetting::FONT_SIZE_COUNT) {
+    fontSize = FontManager::legacyReaderSizeForPointSize(fontSize);
+  }
 #endif
 
   quickActionsMask &= (1u << SystemSetting::READER_BUTTON_ACTION_COUNT) - 1;
   quickActionsMask &= ~(1u << SystemSetting::BTN_ACTION_NONE);
   quickActionsMask &= ~(1u << SystemSetting::BTN_ACTION_QUICK_ACTIONS);
 
-  if (xtcImageQuality >= SystemSetting::READER_IMAGE_QUALITY_COUNT) xtcImageQuality = SystemSetting::READER_IMAGE_LOW;
-  if (xtcShortPwrBtn >= SystemSetting::XTC_SHORT_PWRBTN_COUNT) xtcShortPwrBtn = SystemSetting::XTC_POWER_NEXT;
-  if (xtcPageAutoTurnSeconds > 60 || xtcPageAutoTurnSeconds % 10 != 0) xtcPageAutoTurnSeconds = 0;
-  if (!validRefreshFrequency(xtcRefreshFrequency)) xtcRefreshFrequency = 15;
+  if (pageTurnMode > PAGE_TURN_TAP) pageTurnMode = PAGE_TURN_TAP;
+  if (disableLightControl > 1) disableLightControl = 0;
+  if (doubleTapAction >= SystemSetting::READER_BUTTON_ACTION_COUNT) {
+    doubleTapAction = SystemSetting::BTN_ACTION_NONE;
+  }
 
   INX_SERIAL.printf("[%lu] [CPR] Reader settings loaded (version %u, %u items)\n", millis(), version, settingsRead);
-
-  if (shouldRewriteSettings) {
-    saveToFile();
-  }
 
   return true;
 }
@@ -410,14 +429,12 @@ bool ReaderSetting::loadFromFile() {
  * @return Line compression multiplier
  */
 float ReaderSetting::getReaderLineCompression() const {
-  // lineHeight is a percentage of the font's natural line height (100 = normal). Clamp 10-200.
   uint8_t lh = lineHeight;
   if (lh < 10 || lh > 200) lh = 100;
   return static_cast<float>(lh) / 100.0f;
 }
 
 float ReaderSetting::getReaderWordSpacingFactor() const {
-  // textSpace is a percentage of the natural inter-word space (100 = normal). Clamp 10-200.
   uint8_t ts = textSpace;
   if (ts < 10 || ts > 200) ts = 100;
   return static_cast<float>(ts) / 100.0f;
@@ -455,7 +472,7 @@ int ReaderSetting::getReaderFontIdForSettingsUi(uint8_t familySlot, uint8_t size
   if (familySlot < SystemSetting::FONT_FAMILY_BUILTIN_COUNT) {
     return getReaderFontIdForFamilyAndSize(familySlot, sizeIndex);
   }
-  return getReaderFontIdForFamilyAndSize(SystemSetting::ATKINSON_HYPERLEGIBLE, sizeIndex);
+  return getReaderFontIdForFamilyAndSize(SystemSetting::MONTSERRAT, sizeIndex);
 #endif
 }
 
@@ -465,40 +482,29 @@ int ReaderSetting::getReaderFontIdForFamilyAndSize(uint8_t family, uint8_t size)
   (void)size;
   return 0;
 #else
-  if (size >= SystemSetting::FONT_SIZE_COUNT) {
-    size = SystemSetting::MEDIUM;
-  }
-  static const int kPtBySize[] = {10, 12, 14, 16, 18};
-  const int preferredPt = kPtBySize[size];
-
   if (family >= SystemSetting::FONT_FAMILY_BUILTIN_COUNT) {
     const std::string sdName = FontManager::readerFontFamilyLabel(family);
-    if (sdName == "Atkinson Hyperlegible" || sdName == "ChareInk") {
-      if (sdName == "Atkinson Hyperlegible") {
-        return getReaderFontIdForFamilyAndSize(SystemSetting::ATKINSON_HYPERLEGIBLE, size);
+    if (FontManager::isOutlineFontFamily(sdName)) {
+      int pointSize = size;
+      if (pointSize < FontManager::OUTLINE_FONT_MIN_POINT_SIZE ||
+          pointSize > FontManager::OUTLINE_FONT_MAX_POINT_SIZE) {
+        pointSize = FontManager::pointSizeForLegacyReaderSize(size);
       }
-      if (sdName == "ChareInk") {
-        return getReaderFontIdForFamilyAndSize(SystemSetting::CHAREINK, size);
-      }
+      return FontManager::getFontId(sdName, pointSize);
     }
+
+    if (size >= SystemSetting::FONT_SIZE_COUNT) {
+      size = SystemSetting::MEDIUM;
+    }
+    const int preferredPt = FontManager::pointSizeForLegacyReaderSize(size);
     return FontManager::getFontIdNearestPointSize(sdName, preferredPt);
   }
 
+  if (size >= SystemSetting::FONT_SIZE_COUNT) {
+    size = SystemSetting::MEDIUM;
+  }
+
   switch (family) {
-    case SystemSetting::ATKINSON_HYPERLEGIBLE:
-      switch (size) {
-        case SystemSetting::EXTRA_SMALL:
-          return ATKINSON_HYPERLEGIBLE_10_FONT_ID;
-        case SystemSetting::SMALL:
-          return ATKINSON_HYPERLEGIBLE_12_FONT_ID;
-        case SystemSetting::MEDIUM:
-        default:
-          return ATKINSON_HYPERLEGIBLE_14_FONT_ID;
-        case SystemSetting::LARGE:
-          return ATKINSON_HYPERLEGIBLE_16_FONT_ID;
-        case SystemSetting::EXTRA_LARGE:
-          return ATKINSON_HYPERLEGIBLE_18_FONT_ID;
-      }
     case SystemSetting::MONTSERRAT:
       switch (size) {
         case SystemSetting::EXTRA_SMALL:
@@ -513,22 +519,8 @@ int ReaderSetting::getReaderFontIdForFamilyAndSize(uint8_t family, uint8_t size)
         case SystemSetting::EXTRA_LARGE:
           return MONTSERRAT_18_FONT_ID;
       }
-    case SystemSetting::CHAREINK:
-      switch (size) {
-        case SystemSetting::EXTRA_SMALL:
-          return CHAREINK_10_FONT_ID;
-        case SystemSetting::SMALL:
-          return CHAREINK_12_FONT_ID;
-        case SystemSetting::MEDIUM:
-        default:
-          return CHAREINK_14_FONT_ID;
-        case SystemSetting::LARGE:
-          return CHAREINK_16_FONT_ID;
-        case SystemSetting::EXTRA_LARGE:
-          return CHAREINK_18_FONT_ID;
-      }
     default:
-      return getReaderFontIdForFamilyAndSize(SystemSetting::CHAREINK, size);
+      return getReaderFontIdForFamilyAndSize(SystemSetting::MONTSERRAT, size);
   }
 #endif
 }

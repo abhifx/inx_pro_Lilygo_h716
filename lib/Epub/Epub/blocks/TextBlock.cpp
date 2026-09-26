@@ -7,6 +7,7 @@
 
 #include <GfxRenderer.h>
 #include <ImageRender.h>
+#include <RtlText.h>
 #include <Serialization.h>
 #include <Utf8.h>
 
@@ -36,7 +37,6 @@ int renderSmallCapsSegment(const GfxRenderer& renderer, const int fontId, const 
   if (text.empty()) {
     return x;
   }
-  // renderSmallCaps returns its advance, so no separate width measurement pass is needed.
   return renderer.text.renderSmallCaps(fontId, x, y, text.c_str(), black, style);
 }
 
@@ -71,7 +71,7 @@ int measureWordSegment(const GfxRenderer& renderer, const int fontId, const std:
                    : renderer.text.getWidth(fontId, text.c_str(), style);
 }
 
-}  // namespace
+}
 
 uint8_t TextBlock::compactByteList(std::list<uint8_t>& values, const uint8_t emptyDefault) {
   if (values.empty()) {
@@ -308,88 +308,69 @@ void TextBlock::render(GfxRenderer& renderer, const int fontId, const int x, con
     return;
   }
 
-  auto slotIt = wordSlots.begin();
-  auto styleIt = wordStyles ? wordStyles->begin() : std::vector<EpdFontFamily::Style>::const_iterator();
-  auto prefixIt = bionicPrefixBytes ? bionicPrefixBytes->begin() : std::vector<uint8_t>::const_iterator();
-  auto smallCapsIt = wordSmallCaps ? wordSmallCaps->begin() : std::vector<uint8_t>::const_iterator();
-  auto underlineIt = wordUnderline ? wordUnderline->begin() : std::vector<uint8_t>::const_iterator();
-  auto verticalAlignIt = wordVerticalAlign ? wordVerticalAlign->begin() : std::vector<uint8_t>::const_iterator();
-  auto imgPathIt = wordImagePaths ? wordImagePaths->begin() : std::vector<std::string>::const_iterator();
-  auto imgWIt = wordImageW ? wordImageW->begin() : std::vector<uint16_t>::const_iterator();
-  auto imgHIt = wordImageH ? wordImageH->begin() : std::vector<uint16_t>::const_iterator();
   const bool hasBionicVector = bionicPrefixBytes && !bionicPrefixBytes->empty();
   const bool hasSmallCapsVector = wordSmallCaps && !wordSmallCaps->empty();
   const bool hasUnderlineVector = wordUnderline && !wordUnderline->empty();
   const bool hasVerticalAlignVector = wordVerticalAlign && !wordVerticalAlign->empty();
   const bool hasImages = wordImagePaths && !wordImagePaths->empty();
 
-  // Underline sits just below the baseline.
+  bool rtl = false;
+  for (const auto& slot : wordSlots) {
+    const RtlText::Direction direction = RtlText::firstStrongDirection(slot.text.c_str());
+    if (direction == RtlText::Direction::RTL) {
+      rtl = true;
+      break;
+    }
+    if (direction == RtlText::Direction::LTR) {
+      break;
+    }
+  }
+
   const int underlineY = y + renderer.text.getFontAscenderSize(fontId) + 1;
   const int lineHeight = renderer.text.getLineHeight(fontId);
 
-  for (; slotIt != wordSlots.end(); ++slotIt) {
-    const EpdFontFamily::Style wordStyle = wordStyles ? *styleIt : EpdFontFamily::REGULAR;
-    const uint8_t prefixBytes = hasBionicVector ? *prefixIt : bionicPrefixDefault;
-    const bool smallCaps = hasSmallCapsVector ? (*smallCapsIt != 0) : (smallCapsDefault != 0);
-    const bool underline = hasUnderlineVector ? (*underlineIt != 0) : (underlineDefault != 0);
-    const uint8_t verticalAlign = hasVerticalAlignVector ? *verticalAlignIt : verticalAlignDefault;
-    const int startX = slotIt->xpos + x;
+  for (size_t placementIndex = 0; placementIndex < wordCount; ++placementIndex) {
+    const size_t dataIndex = rtl ? wordCount - placementIndex - 1 : placementIndex;
+    const WordSlot& slot = wordSlots[dataIndex];
+    const EpdFontFamily::Style wordStyle = wordStyles ? (*wordStyles)[dataIndex] : EpdFontFamily::REGULAR;
+    // Bionic prefixes are defined in logical LTR order. Do not split an RTL
+    // word into two independently rendered runs.
+    const uint8_t prefixBytes = !rtl && hasBionicVector ? (*bionicPrefixBytes)[dataIndex] : bionicPrefixDefault;
+    const bool smallCaps = hasSmallCapsVector ? ((*wordSmallCaps)[dataIndex] != 0) : (smallCapsDefault != 0);
+    const bool underline = hasUnderlineVector ? ((*wordUnderline)[dataIndex] != 0) : (underlineDefault != 0);
+    const uint8_t verticalAlign = hasVerticalAlignVector ? (*wordVerticalAlign)[dataIndex] : verticalAlignDefault;
+    // Positions are laid out in visual left-to-right slots. RTL swaps the
+    // logical word assigned to each slot while TextRender reverses each word.
+    const int startX = wordSlots[placementIndex].xpos + x;
     int endX = startX;
 
-    // Inline image word: draw the cached image vertically centered on the line and skip the text path.
-    if (hasImages && imgPathIt != wordImagePaths->end() && !imgPathIt->empty()) {
-      const int imgW = (wordImageW && imgWIt != wordImageW->end()) ? *imgWIt : 0;
-      const int imgH = (wordImageH && imgHIt != wordImageH->end()) ? *imgHIt : 0;
+    const bool hasImage = hasImages && dataIndex < wordImagePaths->size() && !(*wordImagePaths)[dataIndex].empty();
+    if (hasImage) {
+      const int imgW = (wordImageW && dataIndex < wordImageW->size()) ? (*wordImageW)[dataIndex] : 0;
+      const int imgH = (wordImageH && dataIndex < wordImageH->size()) ? (*wordImageH)[dataIndex] : 0;
       if (imgW > 0 && imgH > 0) {
         const int imgY = y + std::max(0, (lineHeight - imgH) / 2);
-        ImageRender::create(renderer, *imgPathIt).render(startX, imgY, imgW, imgH, ImageRenderMode::OneBit);
+        ImageRender::create(renderer, (*wordImagePaths)[dataIndex]).render(startX, imgY, imgW, imgH,
+                                                                            ImageRenderMode::OneBit);
       }
-      if (hasBionicVector) ++prefixIt;
-      if (hasSmallCapsVector) ++smallCapsIt;
-      if (hasUnderlineVector) ++underlineIt;
-      if (hasVerticalAlignVector) ++verticalAlignIt;
-      ++imgPathIt;
-      if (wordImageW && imgWIt != wordImageW->end()) ++imgWIt;
-      if (wordImageH && imgHIt != wordImageH->end()) ++imgHIt;
-      if (wordStyles) ++styleIt;
       continue;
     }
 
-    if (prefixBytes == 0 || prefixBytes >= slotIt->text.size()) {
-      endX = renderWordSegment(renderer, fontId, startX, y, slotIt->text, wordStyle, smallCaps, verticalAlign, black);
+    if (prefixBytes == 0 || prefixBytes >= slot.text.size()) {
+      endX = renderWordSegment(renderer, fontId, startX, y, slot.text, wordStyle, smallCaps, verticalAlign, black);
     } else {
-      const std::string prefix = slotIt->text.substr(0, prefixBytes);
-      const std::string suffix = slotIt->text.substr(prefixBytes);
+      const std::string prefix = slot.text.substr(0, prefixBytes);
+      const std::string suffix = slot.text.substr(prefixBytes);
       const auto prefixStyle = bionicStyleFor(wordStyle);
       const int suffixX =
           renderWordSegment(renderer, fontId, startX, y, prefix, prefixStyle, smallCaps, verticalAlign, black);
       endX = renderWordSegment(renderer, fontId, suffixX, y, suffix, wordStyle, smallCaps, verticalAlign, black);
     }
     if (underline && endX <= startX) {
-      endX = startX + measureWordSegment(renderer, fontId, slotIt->text, wordStyle, smallCaps, verticalAlign);
+      endX = startX + measureWordSegment(renderer, fontId, slot.text, wordStyle, smallCaps, verticalAlign);
     }
     if (underline && endX > startX) {
       renderer.line.render(startX, underlineY, endX - 1, underlineY, black);
-    }
-    if (hasBionicVector) {
-      ++prefixIt;
-    }
-    if (hasSmallCapsVector) {
-      ++smallCapsIt;
-    }
-    if (hasUnderlineVector) {
-      ++underlineIt;
-    }
-    if (hasVerticalAlignVector) {
-      ++verticalAlignIt;
-    }
-    if (hasImages) {
-      if (imgPathIt != wordImagePaths->end()) ++imgPathIt;
-      if (wordImageW && imgWIt != wordImageW->end()) ++imgWIt;
-      if (wordImageH && imgHIt != wordImageH->end()) ++imgHIt;
-    }
-    if (wordStyles) {
-      ++styleIt;
     }
   }
 }
@@ -449,8 +430,6 @@ bool TextBlock::serialize(FsFile& file) const {
   } else {
     for (auto f : *wordVerticalAlign) serialization::writePod(file, f);
   }
-  // Inline image fields (path + display size), parallel to words. A single flag keeps text-only lines free of
-  // any per-word image data on disk (and avoids allocating empty placeholders on load).
   const uint8_t hasImages = (wordImagePaths && !wordImagePaths->empty()) ? 1 : 0;
   serialization::writePod(file, hasImages);
   if (hasImages) {
@@ -466,8 +445,6 @@ bool TextBlock::serialize(FsFile& file) const {
       for (size_t i = 0; i < wordCount; ++i) serialization::writePod(file, static_cast<uint16_t>(0));
     }
   }
-  // Footnote/endnote link targets, parallel to words - same "one flag, skip entirely when absent" shape as
-  // the image fields above, so plain text (the overwhelming majority of lines) pays nothing extra on disk.
   const uint8_t hasFootnoteLinks = (wordFootnoteTargets && !wordFootnoteTargets->empty()) ? 1 : 0;
   serialization::writePod(file, hasFootnoteLinks);
   if (hasFootnoteLinks) {

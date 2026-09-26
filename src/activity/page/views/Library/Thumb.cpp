@@ -43,13 +43,14 @@ void drawTitle(const GfxRenderer& renderer, const std::string& value, const int 
   renderer.text.render(font, x, y, title.c_str(), true, style);
 }
 
-void drawFavoriteBadge(const GfxRenderer& renderer, const int x, const int y, const int width, const bool favorite) {
+void drawFavoriteBadge(const GfxRenderer& renderer, const int x, const int y, const int width, const bool favorite,
+                       const bool topRight = true) {
   if (!favorite) return;
   constexpr int iconSize = 24;
   constexpr int badgePadding = 5;
   constexpr int badgeMargin = 5;
   constexpr int badgeSize = iconSize + badgePadding * 2;
-  const int badgeX = x + std::max(0, width - badgeSize - badgeMargin);
+  const int badgeX = topRight ? x + std::max(0, width - badgeSize - badgeMargin) : x + badgeMargin;
   const int badgeY = y + badgeMargin;
   renderer.rectangle.fill(badgeX, badgeY, badgeSize, badgeSize, static_cast<int>(GfxRenderer::FillTone::Ink), true);
   renderer.bitmap.icon(Star, badgeX + badgePadding, badgeY + badgePadding, iconSize, iconSize,
@@ -67,7 +68,24 @@ void drawFolderBookCountBadge(const GfxRenderer& renderer, const int x, const in
   const int badgeWidth = renderer.text.getWidth(font, label.c_str()) + paddingX * 2;
   const int badgeHeight = renderer.text.getLineHeight(font) + paddingY * 2;
   const int badgeX = x + std::max(0, width - badgeWidth - margin);
-  const int badgeY = y + std::max(0, height - badgeHeight - margin);
+  const int badgeY = y + margin;
+  renderer.rectangle.fill(badgeX, badgeY, badgeWidth, badgeHeight,
+                          static_cast<int>(GfxRenderer::FillTone::Ink), true);
+  renderer.rectangle.render(badgeX, badgeY, badgeWidth, badgeHeight, false, true);
+  renderer.text.render(font, badgeX + paddingX, badgeY + paddingY, label.c_str(), false);
+}
+
+void drawItemBadge(const GfxRenderer& renderer, const int x, const int y, const int width,
+                   const std::string& label) {
+  if (label.empty() || width < 8) return;
+  constexpr int paddingX = 6;
+  constexpr int paddingY = 4;
+  constexpr int margin = 5;
+  constexpr int font = MONTSERRAT_8_FONT_ID;
+  const int badgeWidth = renderer.text.getWidth(font, label.c_str()) + paddingX * 2;
+  const int badgeHeight = renderer.text.getLineHeight(font) + paddingY * 2;
+  const int badgeX = x + std::max(0, width - badgeWidth - margin);
+  const int badgeY = y + margin;
   renderer.rectangle.fill(badgeX, badgeY, badgeWidth, badgeHeight,
                           static_cast<int>(GfxRenderer::FillTone::Ink), true);
   renderer.rectangle.render(badgeX, badgeY, badgeWidth, badgeHeight, false, true);
@@ -118,6 +136,15 @@ std::string folderImagePath(const std::string& folder) {
   return imagePath(cacheDirectory(folder));
 }
 
+void drawContrastFrame(GfxRenderer& renderer, const int x, const int y, const int width, const int height,
+                       const bool rounded) {
+  if (width < 1 || height < 1) return;
+  renderer.rectangle.render(x, y, width, height, true, rounded);
+  if (width > 3 && height > 3) {
+    renderer.rectangle.render(x + 1, y + 1, width - 2, height - 2, false, rounded);
+  }
+}
+
 std::vector<std::string> folderCovers(const std::string& folder, const std::vector<LibraryIndex::Book>& books,
                                       const int limit) {
   std::vector<std::string> covers;
@@ -132,10 +159,6 @@ std::vector<std::string> folderCovers(const std::string& folder, const std::vect
   }
   if (!covers.empty()) return covers;
 
-  // A folder holding only subfolders has no direct book children, so the loop above finds nothing and
-  // the cell used to render as an empty rectangle. Fall back to the first covers found anywhere beneath
-  // it, so such a folder shows its nested books' thumbnails instead. Only runs when the direct pass came
-  // up empty, so ordinary folders keep using their own books and pay nothing for this.
   const std::string prefix = folder == "/" ? folder : folder + "/";
   checked = 0;
   for (const LibraryIndex::Book& book : books) {
@@ -158,7 +181,19 @@ int folderBookCount(const std::string& folder, const std::vector<LibraryIndex::B
 }
 
 int folderBookCount(const LibraryIndex::Book& folder, const std::vector<LibraryIndex::Book>& books) {
-  return books.empty() && folder.hasMetadata ? folder.bookCount : folderBookCount(folder.path, books);
+  return folder.hasMetadata ? folder.bookCount : folderBookCount(folder.path, books);
+}
+
+const LibraryIndex::Book* singleBookInFolder(const std::string& folder,
+                                             const std::vector<LibraryIndex::Book>& books) {
+  const std::string prefix = folder == "/" ? "/" : folder + "/";
+  const LibraryIndex::Book* result = nullptr;
+  for (const LibraryIndex::Book& book : books) {
+    if (book.type != LibraryIndex::Book::Type::BOOK || book.path.compare(0, prefix.size(), prefix) != 0) continue;
+    if (result != nullptr) return nullptr;
+    result = &book;
+  }
+  return result;
 }
 
 int folderChildCount(const std::string& folder, const std::vector<LibraryIndex::Book>& books) {
@@ -173,6 +208,7 @@ bool cover(GfxRenderer& renderer, const std::string& path, const int x, const in
   renderer.rectangle.fill(x, y, width, height, false, rounded);
   ImageRender::Options options;
   options.cropToFill = cropToFill;
+  options.cropAnchorX = 0.5f;
   options.useDisplayCache = true;
   options.asyncDisplayCache = true;
   options.roundedOutside = rounded ? BitmapRender::RoundedOutside::PaperOutside
@@ -180,22 +216,74 @@ bool cover(GfxRenderer& renderer, const std::string& path, const int x, const in
   if (!ImageRender::create(renderer, path).render(x, y, width, height, options)) {
     return false;
   }
-  if (frame) renderer.rectangle.render(x, y, width, height, true, rounded);
+  if (frame) drawContrastFrame(renderer, x, y, width, height, rounded);
   return true;
 }
 
-// Vertical breathing room between the thumbnail stack and the folder name. The image area below is
-// shortened by the same amount, so the label sits in its own space instead of butting against the art.
+bool coverSlice(GfxRenderer& renderer, const std::string& path, const int x, const int y, const int width,
+                const int height, const bool rounded) {
+  if (path.empty() || width < 1 || height < 8) return false;
+  renderer.rectangle.fill(x, y, width, height, false, rounded);
+  ImageRender::Options options;
+  options.cropToFill = true;
+  options.cropAnchorX = 0.0f;
+  options.useDisplayCache = true;
+  options.asyncDisplayCache = true;
+  options.roundedOutside = rounded ? BitmapRender::RoundedOutside::PaperOutside
+                                   : BitmapRender::RoundedOutside::None;
+  if (!ImageRender::create(renderer, path).render(x, y, width, height, options)) return false;
+  drawContrastFrame(renderer, x, y, width, height, rounded);
+  return true;
+}
+
+void drawFolderStack(GfxRenderer& renderer, const std::string& firstPath, const std::string& secondPath,
+                     const std::string& thirdPath,
+                     const int frontX, const int frontY, const int frontWidth, const int frontHeight,
+                     const bool rounded, const bool cropToFill) {
+  constexpr int layerStep = 9;
+
+  const int backingHeight = std::max(8, frontHeight - 18);
+  const int thirdHeight = std::max(8, frontHeight - 12);
+  const int secondHeight = std::max(8, frontHeight - 6);
+  renderer.rectangle.fill(frontX - layerStep * 2, frontY + (frontHeight - backingHeight) / 2, frontWidth,
+                          backingHeight, static_cast<int>(GfxRenderer::FillTone::Paper), rounded);
+  renderer.rectangle.render(frontX - layerStep * 2, frontY + (frontHeight - backingHeight) / 2, frontWidth,
+                            backingHeight, true, rounded);
+  if (!thirdPath.empty()) {
+    coverSlice(renderer, thirdPath, frontX - layerStep * 2,
+               frontY + (frontHeight - thirdHeight) / 2, layerStep * 2, thirdHeight, rounded);
+  } else {
+    const int x = frontX - layerStep * 2;
+    const int y = frontY + (frontHeight - thirdHeight) / 2;
+    renderer.rectangle.fill(x, y, layerStep * 2, thirdHeight,
+                            static_cast<int>(GfxRenderer::FillTone::Paper), rounded);
+    renderer.rectangle.render(x, y, layerStep * 2, thirdHeight, true, rounded);
+  }
+  if (!secondPath.empty()) {
+    coverSlice(renderer, secondPath, frontX - layerStep, frontY + (frontHeight - secondHeight) / 2, layerStep,
+               secondHeight, rounded);
+  } else {
+    const int x = frontX - layerStep;
+    const int y = frontY + (frontHeight - secondHeight) / 2;
+    renderer.rectangle.fill(x, y, layerStep, secondHeight,
+                            static_cast<int>(GfxRenderer::FillTone::Paper), rounded);
+    renderer.rectangle.render(x, y, layerStep, secondHeight, true, rounded);
+  }
+  cover(renderer, firstPath, frontX, frontY, frontWidth, frontHeight, rounded, true, cropToFill);
+}
+
+// Keep a small gap between the cover and the title at the bottom of a tile.
 constexpr int kFolderLabelGap = 10;
 
-// labelX is the LEFT EDGE OF THE THUMBNAIL, not of the cell: the covers are centred within the cell, so
-// aligning the name to the cell would leave it visibly offset from the art above it.
 void folderLabel(GfxRenderer& renderer, const std::string& value, const int labelX, const int labelWidthAvailable,
-                 const int y, const int height) {
+                 const int y, const int height, const int bottomOffset = 5) {
   const int font = systemFontId();
   const int lineHeight = renderer.text.getLineHeight(font);
-  const std::string label = renderer.text.truncate(font, value.c_str(), std::max(8, labelWidthAvailable));
-  renderer.text.render(font, labelX, y + height - lineHeight - 10, label.c_str(), true);
+  constexpr int horizontalMargin = 10;
+  const int textX = labelX + horizontalMargin;
+  const int textWidth = std::max(8, labelWidthAvailable - horizontalMargin * 2);
+  const std::string label = renderer.text.truncate(font, value.c_str(), textWidth);
+  renderer.text.render(font, textX, y + height - lineHeight - bottomOffset, label.c_str(), true);
 }
 
 void placeholder(const GfxRenderer& renderer, const int x, const int y, const int width, const int height,
@@ -232,40 +320,50 @@ void placeholder(const GfxRenderer& renderer, const int x, const int y, const in
 }
 
 void drawFolderPlaceholder(GfxRenderer& renderer, const LibraryIndex::Book& item, const int x, const int y,
-                           const int width, const int height, const bool favorite, const int bookCount) {
-  constexpr int padding = 5;
+                           const int width, const int height, const bool favorite, const int bookCount,
+                           const std::string& titleOverride = {}) {
   const bool hideTitle = SETTINGS.hideThumbnailTitles != 0;
-  const int font = systemFontId();
-  const int lineHeight = hideTitle ? 0 : renderer.text.getLineHeight(font);
+  constexpr int padding = 3;
+  const int lineHeight = hideTitle ? 0 : renderer.text.getLineHeight(systemFontId());
+  const int titleHeight = hideTitle ? 0 : lineHeight + kFolderLabelGap;
   const int imageY = y + padding;
-  const int labelSpacing = hideTitle ? 0 : 4 + kFolderLabelGap;
-  const int imageHeight = std::max(8, height - lineHeight - padding * 2 - labelSpacing);
-  const int emptyWidth = std::max(8, std::min(width - padding * 2, imageHeight * 2 / 3));
+  const int imageHeight = std::max(8, height - titleHeight - padding * 2);
+  const int emptyWidth = std::max(8, width - padding * 2);
   const int emptyX = x + (width - emptyWidth) / 2;
-  placeholder(renderer, emptyX, imageY, emptyWidth, imageHeight, hideTitle ? bookTitle(item) : "");
+  const std::string title = titleOverride.empty() ? bookTitle(item) : titleOverride;
+  placeholder(renderer, emptyX, imageY, emptyWidth, imageHeight, hideTitle ? title : "");
   if (!hideTitle) {
-    folderLabel(renderer, bookTitle(item), emptyX, emptyWidth, y, height);
+    folderLabel(renderer, title, emptyX, emptyWidth, y, height);
   }
-  drawFavoriteBadge(renderer, emptyX, imageY, emptyWidth, favorite);
+  drawFavoriteBadge(renderer, emptyX, imageY, emptyWidth, favorite, false);
   drawFolderBookCountBadge(renderer, emptyX, imageY, emptyWidth, imageHeight, bookCount);
 }
 
-}  // namespace
+}
 
 Thumb::Thumb(GfxRenderer& renderer, MappedInputManager& mappedInput,
              const std::vector<LibraryIndex::Book>& items, const std::vector<LibraryIndex::Book>& books,
              std::function<void(int, bool)> select,
              std::function<bool(const LibraryIndex::Book&)> isFavorite,
              std::function<void(int, int)> outsideTap,
-             std::function<bool(const LibraryIndex::Book&)> isAuthorFolder)
+             std::function<std::vector<std::string>(const LibraryIndex::Book&, int)> folderCovers)
     : renderer(renderer), mappedInput(mappedInput), items(items), books(books), select(std::move(select)),
       isFavorite(std::move(isFavorite)),
-      outsideTap(std::move(outsideTap)), isAuthorFolder(std::move(isAuthorFolder)) {}
+      outsideTap(std::move(outsideTap)), customFolderCovers(std::move(folderCovers)) {}
+
+std::vector<std::string> Thumb::coversForFolder(const LibraryIndex::Book& folder, const int limit) const {
+  if (customFolderCovers) {
+    const std::vector<std::string> custom = customFolderCovers(folder, limit);
+    if (!custom.empty()) return custom;
+  }
+  return folderCovers(folder.path, books, limit);
+}
 
 void Thumb::getThumbnailSize(GfxRenderer& renderer, int& width, int& height) {
+  constexpr int gridMargin = 0;
   const int availableWidth = renderer.getScreenWidth() - sideMargin * 2;
   const int availableHeight = renderer.getScreenHeight() - navigation::Menu::height -
-                              navigation::Menu::bottomHeight - margin * 2;
+                              navigation::Menu::bottomHeight - gridMargin * 2;
   const int cellWidth = (availableWidth - gap * (childColumns - 1)) / childColumns;
   const int cellHeight = (availableHeight - rowGap * (childRows - 1)) / childRows;
   width = std::max(40, cellWidth);
@@ -277,7 +375,6 @@ void Thumb::setRoot(const bool value) { root = value; }
 int Thumb::itemsPerPage() const { return childItemsPerPage; }
 
 void Thumb::load() {
-  // A page restored from a previous visit can be out of range if the folder shrank since.
   if (page > 0 && page >= pageCount()) page = std::max(0, pageCount() - 1);
   calculate();
   loadAt = millis() + 20;
@@ -289,64 +386,44 @@ void Thumb::load() {
     const LibraryIndex::Book& item = items[static_cast<size_t>(start + index)];
     Thumbnail thumbnail;
     thumbnail.item = item.path;
+    std::string folderImage;
+    if (item.type == LibraryIndex::Book::Type::FOLDER) {
+      SdIoMutex::Lock lock;
+      folderImage = folderImagePath(item.path);
+    }
     if (item.type == LibraryIndex::Book::Type::FOLDER) {
       thumbnail.bookCount = folderBookCount(item, books);
       thumbnail.folderCount = item.hasMetadata ? item.folderCount : folderChildCount(item.path, books);
+      if (thumbnail.bookCount == 1) {
+        if (const LibraryIndex::Book* book = singleBookInFolder(item.path, books)) {
+          thumbnail.singleBookTitle = bookTitle(*book);
+        }
+      }
     }
-    // Already resolved this session (e.g. this page/folder was visited before) - its cover path is known
-    // and the display cache for it is very likely still warm, so draw it immediately instead of falling
-    // back to a placeholder while loadNext() re-does the same throttled SD lookups.
     const auto cached = resolvedCache_.find(item.path);
     if (cached != resolvedCache_.end()) {
       const int bookCount = thumbnail.bookCount;
       const int folderCount = thumbnail.folderCount;
+      const std::string singleBookTitle = thumbnail.singleBookTitle;
       thumbnail = cached->second;
       thumbnail.item = item.path;
       thumbnail.bookCount = bookCount;
       thumbnail.folderCount = folderCount;
+      if (!singleBookTitle.empty()) thumbnail.singleBookTitle = singleBookTitle;
       thumbnail.loaded = true;
     }
+    if (!folderImage.empty()) {
+      thumbnail.first.clear();
+      thumbnail.second.clear();
+      thumbnail.third.clear();
+      const std::vector<std::string> covers = coversForFolder(item, 2);
+      if (!covers.empty()) thumbnail.second = covers[0];
+      if (covers.size() > 1) thumbnail.third = covers[1];
+      thumbnail.image = folderImage;
+      thumbnail.loaded = true;
+      resolvedCache_[thumbnail.item] = thumbnail;
+    }
     thumbnails.push_back(std::move(thumbnail));
-  }
-
-  // The child grid is small (at most childItemsPerPage covers) - resolve any still-unloaded entries
-  // synchronously right away instead of waiting on loadNext()'s per-tick throttle (that throttle exists for
-  // folders that fan out to several cover paths per item). If the underlying display cache is already
-  // warm - from earlier this session or persisted on SD from a previous one - the very first render shows
-  // the real covers directly instead of a placeholder that only gets replaced a tick or two later.
-  {
-    std::array<Thumbnail*, childItemsPerPage> booksToMeasure{};
-    int bookCount = 0;
-    {
-      SdIoMutex::Lock lock;
-      for (Thumbnail& thumbnail : thumbnails) {
-        if (thumbnail.loaded) continue;
-        const auto item = std::find_if(items.begin(), items.end(), [&thumbnail](const LibraryIndex::Book& book) {
-          return book.path == thumbnail.item;
-        });
-        if (item != items.end()) {
-          if (item->type == LibraryIndex::Book::Type::FOLDER) {
-            const std::vector<std::string> covers = folderCovers(item->path, books, 2);
-            if (!covers.empty()) thumbnail.first = covers[0];
-            if (covers.size() > 1) thumbnail.second = covers[1];
-            if (thumbnail.first.empty()) thumbnail.image = folderImagePath(item->path);
-          } else {
-            thumbnail.image = imagePath(cacheDirectory(item->path));
-            if (!thumbnail.image.empty() && bookCount < static_cast<int>(booksToMeasure.size())) {
-              booksToMeasure[bookCount++] = &thumbnail;
-            }
-          }
-        }
-        thumbnail.loaded = true;
-      }
-    }
-    for (int index = 0; index < bookCount; ++index) {
-      Thumbnail* thumbnail = booksToMeasure[static_cast<size_t>(index)];
-      ImageRender::getDimensions(thumbnail->image, &thumbnail->imageWidth, &thumbnail->imageHeight);
-    }
-    for (Thumbnail& thumbnail : thumbnails) {
-      if (thumbnail.loaded) resolvedCache_[thumbnail.item] = thumbnail;
-    }
   }
 }
 
@@ -358,10 +435,6 @@ bool Thumb::loadNext() {
   }
   if (static_cast<long>(now - loadAt) < 0) return false;
 
-  // Resolve every cell on the page in one pass. At 2 per call a full page needed two or three passes,
-  // and each pass repainted and paid another full ~140ms panel refresh before the remaining covers
-  // appeared - so the page visibly filled in stages. The work per thumbnail is unchanged; this just
-  // stops splitting it across refreshes. Touch still pre-empts it via the isTouchPressed() check above.
   const int limit = childItemsPerPage;
   int loaded = 0;
   std::array<Thumbnail*, childItemsPerPage> booksToMeasure{};
@@ -377,11 +450,26 @@ bool Thumb::loadNext() {
       });
       if (item != items.end()) {
         if (item->type == LibraryIndex::Book::Type::FOLDER) {
-          const std::vector<std::string> covers = folderCovers(item->path, books, 2);
-          if (!covers.empty()) thumbnail.first = covers[0];
-          if (covers.size() > 1) thumbnail.second = covers[1];
-          if (covers.size() > 2) thumbnail.third = covers[2];
-          if (thumbnail.first.empty()) thumbnail.image = folderImagePath(item->path);
+          const std::string folderImage = folderImagePath(item->path);
+          if (!folderImage.empty()) {
+            thumbnail.first.clear();
+            thumbnail.second.clear();
+            thumbnail.third.clear();
+            const std::vector<std::string> covers = coversForFolder(*item, 2);
+            if (!covers.empty()) thumbnail.second = covers[0];
+            if (covers.size() > 1) thumbnail.third = covers[1];
+            thumbnail.image = folderImage;
+          } else {
+            const std::vector<std::string> covers = coversForFolder(*item, 3);
+            if (!covers.empty()) thumbnail.first = covers[0];
+            if (covers.size() > 1) thumbnail.second = covers[1];
+            if (covers.size() > 2) thumbnail.third = covers[2];
+          }
+          if (thumbnail.bookCount == 1) {
+            if (const LibraryIndex::Book* book = singleBookInFolder(item->path, books)) {
+              thumbnail.singleBookTitle = bookTitle(*book);
+            }
+          }
         } else {
           thumbnail.image = imagePath(cacheDirectory(item->path));
           if (!thumbnail.image.empty() && bookCount < static_cast<int>(booksToMeasure.size())) {
@@ -400,8 +488,6 @@ bool Thumb::loadNext() {
     Thumbnail* thumbnail = booksToMeasure[static_cast<size_t>(index)];
     ImageRender::getDimensions(thumbnail->image, &thumbnail->imageWidth, &thumbnail->imageHeight);
   }
-  // Remember what was just resolved (cover path(s) + measured size) so revisiting this page/folder later
-  // in the session can skip straight to drawing instead of re-running these SD lookups behind a placeholder.
   for (int index = 0; index < resolvedCount; ++index) {
     const Thumbnail* thumbnail = resolvedThisCall[static_cast<size_t>(index)];
     resolvedCache_[thumbnail->item] = *thumbnail;
@@ -409,11 +495,6 @@ bool Thumb::loadNext() {
   return loaded > 0;
 }
 
-// Runs only once the visible page is fully resolved and the user is idle. Resolves the NEXT page's
-// cover path(s) and measures them, storing the result in resolvedCache_ - the same cache load() consults.
-// A page turn then finds every cell already resolved and draws immediately instead of trickling in behind
-// placeholders while loadNext() redoes these SD lookups. One item per call so a long folder never blocks
-// input; returns false when there is nothing left to warm, which stops the caller re-entering.
 bool Thumb::prefetchNextPage() {
   if (mappedInput.isTouchPressed()) return false;
   const int perPage = itemsPerPage();
@@ -430,12 +511,27 @@ bool Thumb::prefetchNextPage() {
     {
       SdIoMutex::Lock lock;
       if (item.type == LibraryIndex::Book::Type::FOLDER) {
-        const std::vector<std::string> covers = folderCovers(item.path, books, 2);
-        if (!covers.empty()) thumbnail.first = covers[0];
-        if (covers.size() > 1) thumbnail.second = covers[1];
-        if (thumbnail.first.empty()) thumbnail.image = folderImagePath(item.path);
+        const std::string folderImage = folderImagePath(item.path);
+        if (!folderImage.empty()) {
+          thumbnail.second.clear();
+          thumbnail.third.clear();
+          const std::vector<std::string> covers = coversForFolder(item, 2);
+          if (!covers.empty()) thumbnail.second = covers[0];
+          if (covers.size() > 1) thumbnail.third = covers[1];
+          thumbnail.image = folderImage;
+        } else {
+          const std::vector<std::string> covers = coversForFolder(item, 3);
+          if (!covers.empty()) thumbnail.first = covers[0];
+          if (covers.size() > 1) thumbnail.second = covers[1];
+          if (covers.size() > 2) thumbnail.third = covers[2];
+        }
         thumbnail.bookCount = folderBookCount(item, books);
         thumbnail.folderCount = item.hasMetadata ? item.folderCount : folderChildCount(item.path, books);
+        if (thumbnail.bookCount == 1) {
+          if (const LibraryIndex::Book* book = singleBookInFolder(item.path, books)) {
+            thumbnail.singleBookTitle = bookTitle(*book);
+          }
+        }
       } else {
         thumbnail.image = imagePath(cacheDirectory(item.path));
       }
@@ -445,7 +541,7 @@ bool Thumb::prefetchNextPage() {
     }
     thumbnail.loaded = true;
     resolvedCache_[thumbnail.item] = thumbnail;
-    return true;  // one per call - hand control back to loop() between items
+    return true;
   }
   return false;
 }
@@ -457,20 +553,20 @@ int Thumb::pageCount() const {
   return std::max(1, (static_cast<int>(items.size()) + perPage - 1) / perPage);
 }
 
-int Thumb::top() const { return navigation::Menu::height; }
+int Thumb::top() const { return navigation::Menu::height + 10; }
 
-// The root folder used to have its own full-width list layout (one wide row per item, drawn by
-// drawRootItem() with a fanned-out carousel of up to 3 covers). It now uses the same stacked thumbnail
-// grid as any child folder, so the view does not change shape when you descend into a folder.
 void Thumb::calculate() {
+  // Keep the label gap and cover area inside the tile while using the outer
+  // margin to give each thumbnail a little more height.
+  constexpr int gridMargin = 0;
   const int availableWidth = renderer.getScreenWidth() - sideMargin * 2;
-  const int availableHeight = renderer.getScreenHeight() - top() - navigation::Menu::bottomHeight - margin * 2;
+  const int availableHeight = renderer.getScreenHeight() - top() - navigation::Menu::bottomHeight - gridMargin * 2;
   const int width = std::max(40, (availableWidth - gap * (childColumns - 1)) / childColumns);
   const int height = std::max(40, (availableHeight - rowGap * (childRows - 1)) / childRows);
   const int gridWidth = width * childColumns + gap * (childColumns - 1);
   const int gridHeight = height * childRows + rowGap * (childRows - 1);
   const int x = sideMargin + std::max(0, (availableWidth - gridWidth) / 2);
-  const int y = top() + margin + std::max(0, (availableHeight - gridHeight) / 2);
+  const int y = top() + gridMargin + std::max(0, (availableHeight - gridHeight) / 2);
 
   for (int index = 0; index < childItemsPerPage; ++index) {
     Rect& cell = cells[static_cast<size_t>(index)];
@@ -489,78 +585,70 @@ const Thumb::Thumbnail* Thumb::find(const std::string& item) const {
 }
 
 void Thumb::drawItem(const LibraryIndex::Book& item, const int x, const int y, const int width,
-                     const int height, const bool favorite, const bool authorFolder) const {
-  constexpr int padding = 5;
+                     const int height, const bool favorite) const {
   const bool rounded = SETTINGS.bitmapRoundedCorners != 0;
   const Thumbnail* thumbnail = find(item.path);
   if (item.type == LibraryIndex::Book::Type::FOLDER) {
     const bool hideTitle = SETTINGS.hideThumbnailTitles != 0;
-    const int font = systemFontId();
-    const int lineHeight = hideTitle ? 0 : renderer.text.getLineHeight(font);
+    constexpr bool evenThumbnails = true;
+    constexpr int padding = 3;
+    const int lineHeight = hideTitle ? 0 : renderer.text.getLineHeight(systemFontId());
+    const int titleHeight = hideTitle ? 0 : lineHeight + kFolderLabelGap;
     const int imageY = y + padding;
-    const int labelSpacing = hideTitle ? 0 : 4 + kFolderLabelGap;
-    const int imageHeight = std::max(8, height - lineHeight - padding * 2 - labelSpacing);
-    if (authorFolder) {
-      // Author groups have no real folder cover. Use the same 2:3 placeholder and label
-      // layout as a coverless item in the regular thumbnail library view.
-      drawFolderPlaceholder(renderer, item, x, y, width, height, favorite, thumbnail ? thumbnail->bookCount : 0);
-      return;
-    }
+    const int imageHeight = std::max(8, height - titleHeight - padding * 2);
     if (thumbnail && thumbnail->loaded && !thumbnail->first.empty()) {
       const int frontHeight = imageHeight;
-      const int frontWidth = std::max(12, std::min(width - padding * 2, frontHeight * 2 / 3));
-      int frontBadgeWidth = frontWidth;
-      int stackLeft = x + (width - frontWidth) / 2;
-      int stackWidth = frontWidth;
-      if (thumbnail->second.empty()) {
-        cover(renderer, thumbnail->first, stackLeft, imageY, frontWidth, frontHeight, rounded);
-      } else {
-        // Match the widget shadow geometry: the second thumbnail is a full-size back cover
-        // shifted 10 px down and right, with the first thumbnail drawn over it.
-        constexpr int stackOffset = 10;
-        const int availableWidth = std::max(24, width - padding * 2);
-        const int stackFrontWidth = std::max(12, std::min(frontWidth, availableWidth - stackOffset));
-        const int totalWidth = stackFrontWidth + stackOffset;
-        const int stackX = x + (width - totalWidth) / 2;
-        cover(renderer, thumbnail->second, stackX + stackOffset, imageY + stackOffset, stackFrontWidth,
-              frontHeight, rounded);
-        cover(renderer, thumbnail->first, stackX, imageY, stackFrontWidth, frontHeight, rounded);
-        frontBadgeWidth = stackFrontWidth;
-        stackLeft = stackX;
-        stackWidth = totalWidth;
-      }
+      constexpr int layerStep = 9;
+      const int stackInset = hideTitle ? (evenThumbnails ? 0 : 2) : padding;
+      const int availableWidth = std::max(24, width - stackInset * 2);
+      const int frontWidth = std::max(12, availableWidth - layerStep * 2);
+      const int stackWidth = frontWidth + layerStep * 2;
+      const int stackX = x + std::max(stackInset, (width - stackWidth) / 2);
+      const int frontX = stackX + layerStep * 2;
+      drawFolderStack(renderer, thumbnail->first, thumbnail->second, thumbnail->third, frontX, imageY, frontWidth,
+                      frontHeight, rounded, hideTitle);
       if (!hideTitle) {
-        folderLabel(renderer, bookTitle(item), stackLeft, stackWidth, y, height);
+        folderLabel(renderer, bookTitle(item), frontX, frontWidth, y, height, evenThumbnails ? 5 : 10);
       }
-      drawFavoriteBadge(renderer, stackLeft, imageY, stackWidth, favorite);
-      drawFolderBookCountBadge(renderer, stackLeft, imageY, frontBadgeWidth, frontHeight, thumbnail->bookCount);
+      drawFavoriteBadge(renderer, frontX, imageY, frontWidth, favorite, false);
+      drawFolderBookCountBadge(renderer, frontX, imageY, frontWidth, frontHeight, thumbnail->bookCount);
       return;
     }
 
-    if (thumbnail && thumbnail->loaded &&
-        cover(renderer, thumbnail->image, x + padding, imageY, width - padding * 2, imageHeight, rounded)) {
+    const bool singleBook = thumbnail && thumbnail->bookCount == 1;
+    const std::string singleBookTitle = singleBook ? thumbnail->singleBookTitle : std::string();
+
+    if (thumbnail && thumbnail->loaded && !thumbnail->image.empty()) {
+      constexpr int layerStep = 9;
+      const int stackInset = hideTitle ? (evenThumbnails ? 0 : 2) : padding;
+      const int availableWidth = std::max(24, width - stackInset * 2);
+      const int frontWidth = std::max(12, availableWidth - layerStep * 2);
+      const int stackWidth = frontWidth + layerStep * 2;
+      const int stackX = x + std::max(stackInset, (width - stackWidth) / 2);
+      const int frontX = stackX + layerStep * 2;
+      drawFolderStack(renderer, thumbnail->image, thumbnail->second, thumbnail->third, frontX, imageY, frontWidth,
+                      imageHeight, rounded, hideTitle);
       if (!hideTitle) {
-        folderLabel(renderer, bookTitle(item), x + padding, width - padding * 2, y, height);
+        folderLabel(renderer, singleBookTitle.empty() ? bookTitle(item) : singleBookTitle, frontX, frontWidth, y,
+                    height, evenThumbnails ? 5 : 10);
       }
-      drawFavoriteBadge(renderer, x + padding, imageY, width - padding * 2, favorite);
-      drawFolderBookCountBadge(renderer, x + padding, imageY, width - padding * 2, imageHeight,
-                               thumbnail->bookCount);
+      drawFavoriteBadge(renderer, frontX, imageY, frontWidth, favorite, false);
+      if (!singleBook) {
+        drawFolderBookCountBadge(renderer, frontX, imageY, frontWidth, imageHeight, thumbnail->bookCount);
+      }
       return;
     }
 
-    // Match the coverless-book cell: a 2:3 box in the image area, centred, with the name aligned to its
-    // left edge - rather than a rectangle filling the whole cell, which made empty folders read as a
-    // different kind of item next to empty books.
-    drawFolderPlaceholder(renderer, item, x, y, width, height, favorite, thumbnail ? thumbnail->bookCount : 0);
+    drawFolderPlaceholder(renderer, item, x, y, width, height, favorite,
+                          singleBook ? 0 : (thumbnail ? thumbnail->bookCount : 0), singleBookTitle);
     return;
   }
 
   if (thumbnail && thumbnail->loaded) {
-    const int font = systemFontId();
+    constexpr int padding = 3;
     const bool hideTitle = SETTINGS.hideThumbnailTitles != 0;
-    const int lineHeight = hideTitle ? 0 : renderer.text.getLineHeight(font);
-    constexpr int titleGap = 4;
-    const int titleHeight = hideTitle ? 0 : lineHeight + titleGap;
+    const int lineHeight = hideTitle ? 0 : renderer.text.getLineHeight(systemFontId());
+    const int titleHeight = hideTitle ? 0 : lineHeight + kFolderLabelGap;
     const int imageAreaY = y + padding;
     const int imageAreaWidth = std::max(8, width - padding * 2);
     const int imageAreaHeight = std::max(8, height - titleHeight - padding * 2);
@@ -569,46 +657,37 @@ void Thumb::drawItem(const LibraryIndex::Book& item, const int x, const int y, c
     int imageWidth = imageAreaWidth;
     int imageHeight = imageAreaHeight;
     const bool hasSize = thumbnail->imageWidth > 0 && thumbnail->imageHeight > 0;
-    const bool evenThumbnails = SETTINGS.thumbnailSize == SystemSetting::THUMBNAIL_EVEN;
-    if (hasSize && !evenThumbnails) {
+    if (!hideTitle && hasSize) {
       const float scale = std::min(static_cast<float>(imageAreaWidth) / thumbnail->imageWidth,
                                    static_cast<float>(imageAreaHeight) / thumbnail->imageHeight);
       imageWidth = std::max(1, static_cast<int>(std::lround(thumbnail->imageWidth * scale)));
       imageHeight = std::max(1, static_cast<int>(std::lround(thumbnail->imageHeight * scale)));
       imageX += (imageAreaWidth - imageWidth) / 2;
-      imageY += imageAreaHeight - imageHeight;
+      imageY += (imageAreaHeight - imageHeight) / 2;
     }
-    // Clear the complete image area first. Image renderers only write their image pixels;
-    // without this, text from the placeholder/previous frame can remain in the unused margins.
     renderer.rectangle.fill(x + padding, imageAreaY, imageAreaWidth, imageAreaHeight, false, rounded);
     if (cover(renderer, thumbnail->image, imageX, imageY, imageWidth, imageHeight, rounded,
-              hasSize || evenThumbnails, evenThumbnails)) {
-      // imageX/imageWidth, NOT the image area: the cover is aspect-fitted and centred inside that area,
-      // so anchoring the title to the area's edge leaves it left of the artwork it captions. Even mode
-      // intentionally uses the complete image area and crop-to-fill instead.
-      if (!hideTitle) drawTitle(renderer, bookTitle(item), imageX, y + height - titleHeight, imageWidth, font);
+              hasSize, hideTitle)) {
+      if (!hideTitle) folderLabel(renderer, bookTitle(item), x + padding, imageAreaWidth, y, height);
       drawFavoriteBadge(renderer, imageX, imageY, imageWidth, favorite);
+      drawItemBadge(renderer, imageX, imageY, imageWidth, item.badge);
       return;
     }
   }
-  const int font = systemFontId();
+  constexpr int padding = 3;
   const bool hideTitle = SETTINGS.hideThumbnailTitles != 0;
-  const int lineHeight = hideTitle ? 0 : renderer.text.getLineHeight(font);
-  constexpr int titleGap = 4;
-  const int titleHeight = hideTitle ? 0 : lineHeight + titleGap;
+  const int lineHeight = hideTitle ? 0 : renderer.text.getLineHeight(systemFontId());
+  const int titleHeight = hideTitle ? 0 : lineHeight + kFolderLabelGap;
   const int imageAreaY = y + padding;
   const int imageAreaHeight = std::max(8, height - titleHeight - padding * 2);
-  // 2:3, the proportions of a book cover, so a coverless book occupies the same footprint as one with
-  // artwork instead of a full-cell-width slab. Centred like a real cover, with the title aligned to the
-  // box's own left edge.
-  const int placeholderWidth = std::max(8, std::min(width - padding * 2, imageAreaHeight * 2 / 3));
+  const int placeholderWidth = std::max(8, width - padding * 2);
   const int placeholderX = x + (width - placeholderWidth) / 2;
   placeholder(renderer, placeholderX, imageAreaY, placeholderWidth, imageAreaHeight,
               hideTitle ? bookTitle(item) : "");
-  if (!hideTitle) drawTitle(renderer, bookTitle(item), placeholderX, y + height - titleHeight, placeholderWidth, font);
+  if (!hideTitle) folderLabel(renderer, bookTitle(item), x + padding, std::max(8, width - padding * 2), y, height);
   drawFavoriteBadge(renderer, placeholderX, imageAreaY, placeholderWidth, favorite);
+  drawItemBadge(renderer, placeholderX, imageAreaY, placeholderWidth, item.badge);
 }
-
 
 void Thumb::itemBounds(const int index, int& x, int& y, int& width, int& height) const {
   const Rect& cell = cells[static_cast<size_t>(index)];
@@ -678,9 +757,9 @@ void Thumb::render() const {
     itemBounds(index, x, y, width, height);
     const LibraryIndex::Book& item = items[static_cast<size_t>(start + index)];
     const bool favorite = isFavorite && isFavorite(item);
-    drawItem(item, x, y, width, height, favorite, isAuthorFolder && isAuthorFolder(item));
+    drawItem(item, x, y, width, height, favorite);
   }
 }
 
-}  // namespace library
-}  // namespace views
+}
+}

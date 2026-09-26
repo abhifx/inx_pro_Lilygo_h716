@@ -56,14 +56,8 @@ class ChapterHtmlSlimParser {
   int underlineUntilDepth = INT_MAX;
   int superscriptUntilDepth = INT_MAX;
   int subscriptUntilDepth = INT_MAX;
-  // Depth of the innermost currently-open <a> that was classified as a footnote/endnote link (see
-  // classifyFootnoteLink()), and the target string to stamp onto words emitted while it's active.
   int footnoteLinkUntilDepth = INT_MAX;
   std::string currentFootnoteTarget;
-  // Depths of every currently-open <ul>/<ol> (a stack, so nested lists close out correctly). While non-empty,
-  // cancels any first-line text-indent - CSS text-indent or the reader's own default paragraph indent - on
-  // the <li> itself or anything nested inside it (e.g. <li><p>...</p></li>). List items must always line up
-  // regardless of the reader's Indent setting or the book's CSS.
   std::vector<int> listNoIndentDepths_;
 
   int fontId;
@@ -76,6 +70,12 @@ class ChapterHtmlSlimParser {
   int dropCapDepth = INT_MAX;
   bool dropCapConsumeWholeContainer = false;
   uint8_t dropCapLineCount = 3;
+  /** Explicit CSS font-size multiplier for the active drop cap; 0 means use initial-letter line count. */
+  float dropCapFontSizeEm = 0.0f;
+  /** CSS ::first-letter line-height multiplier; below 1 uses baseline alignment. */
+  float dropCapLineHeightEm = 0.0f;
+  /** CSS ::first-letter text tone: 0 white, 1 black, 2 gray. */
+  uint8_t dropCapTextTone = 1;
 
   char partWordBuffer[MAX_WORD_SIZE + 1] = {};
   int partWordBufferIndex = 0;
@@ -111,30 +111,13 @@ class ChapterHtmlSlimParser {
   CssParser::UsageFilter cssUsageFilter_;
   bool cssLoaded;
   std::vector<TextBlock::Style> cssAlignmentStack;
-  // Parallel to cssAlignmentStack: true once some element in this ancestry chain (this one or an ancestor)
-  // had a real CSS text-align of its own - as opposed to cssAlignmentStack just holding the document's
-  // default fallback style with no actual CSS behind it. Headers use this to tell "inherit the ancestor's
-  // real text-align" apart from "no CSS alignment info detected anywhere, use the header's own centered
-  // default" (many books rely on that default because their h1/h2 rule is a descendant selector like
-  // ".chapter-title h2" that the simplified CSS matcher's own-element check doesn't detect).
   std::vector<bool> cssAlignmentExplicitStack;
-  // Element depth that pushed each cssAlignmentStack entry, so endElement only pops the level it pushed.
-  // Tags that early-return in startElement (img, hr, table cells, skipped tags) never push; without this an
-  // unconditional pop would drop an ancestor's alignment and break inheritance for later siblings.
   std::vector<int> cssAlignmentDepths;
   std::vector<int> cssDisplayBlockDepths;
-  // Whether <li> items directly inside the innermost open <ul> should draw a bullet marker, per its own
-  // list-style/list-style-type CSS (defaults to visible, matching the browser default of list-style: disc).
   std::vector<bool> ulBulletVisibleStack;
   std::vector<int> ulBulletVisibleDepths;
-  // Set when a <li> that should show a bullet opens; consumed as a standalone marker element (not a text
-  // word - see pendingListMarkerX_) in characterData() right before the first real character of the item's
-  // text, wherever that text ends up nesting.
   bool pendingListMarker_ = false;
-  // Left edge (px) where the pending marker itself should be drawn - the <li>'s margin before its hanging
-  // indent was added.
   int16_t pendingListMarkerX_ = 0;
-  // Hanging-indent width applied to the current <li> (0 if it has no marker), so it can be undone at </li>.
   int listMarkerIndentPx_ = 0;
   struct CssFontStyleScope {
     int depth = 0;
@@ -175,17 +158,8 @@ class ChapterHtmlSlimParser {
     int horizontalChrome = 0;
     bool shrinkToContent = false;
     bool finalized = false;
-    // Set once a nested child's own beginCssBlockBox() call overwrites the shared currentBlock* fields with
-    // its own values while this box is still open - a leaf box (e.g. a single-line <p> bubble) never sees
-    // this, so its own content can still be flushed normally (non-deferred) at its own close, including the
-    // shrink-to-content width narrowing that only runs on that normal path.
     bool stale = false;
   };
-  // A block-like element's own closing spacing (captured right after its beginCssBlockBox() call) so it
-  // survives nested children - a header, a bordered <span>, or a plain nested <div> - that call
-  // beginCssBlockBox() themselves and overwrite the shared currentBlock* fields with their own (different)
-  // values before this element gets to close. Pushed for headers, block tags, and custom-display-block
-  // elements alike (any beginCssBlockBox() caller with real CSS spacing of its own).
   struct BlockClosingScope {
     int depth = 0;
     int marginBottom = 0;
@@ -195,9 +169,6 @@ class ChapterHtmlSlimParser {
     bool usesBorderBox = false;
     int minHeight = 0;
     int16_t contentStartY = 0;
-    // Set once a nested child's own beginCssBlockBox() call overwrites the shared currentBlock* fields with
-    // its own values - signals that this element's preserved values (not the live fields) must be re-applied
-    // when it closes.
     bool stale = false;
   };
   std::vector<CssHorizontalInsetScope> cssHorizontalInsetStack;
@@ -210,6 +181,7 @@ class ChapterHtmlSlimParser {
   int currentCssInsetRightPx = 0;
   int currentBlockBottomSpacingPx = 0;
   bool currentBlockSpacingFromCss = false;
+  int dropCapPageStartMarginPx_ = 0;
   int currentBlockMarginBottomPx = 0;
   int currentBlockPaddingBottomPx = 0;
   int currentBlockBorderTopPx = 0;
@@ -256,22 +228,18 @@ class ChapterHtmlSlimParser {
   size_t tableTextBytes_ = 0;
   bool tableCaptureTruncated_ = false;
 
-  // Persistent Expat state for cooperative next-chapter construction. The
-  // regular parser uses the same lifecycle, but feeds it in one stream call.
   XML_Parser xmlParser_ = nullptr;
-  bool incrementalParseActive_ = false;
-  bool incrementalParseFailed_ = false;
-  enum XML_Error incrementalXmlError_ = XML_ERROR_NONE;
-  XML_Size incrementalXmlLine_ = 0;
-  XML_Size incrementalXmlColumn_ = 0;
-  XML_Index incrementalXmlByte_ = 0;
-  uint32_t incrementalParseStartedAt_ = 0;
-
+  bool parseActive_ = false;
+  bool parseFailed_ = false;
+  enum XML_Error parseXmlError_ = XML_ERROR_NONE;
+  XML_Size parseXmlLine_ = 0;
+  XML_Size parseXmlColumn_ = 0;
+  XML_Index parseXmlByte_ = 0;
   void resetStructuralStateForParsePass();
 
   bool parseHtmlThroughExpat(bool callProgressPopup);
   bool prepareParse(bool skipImageProcessing);
-  void recordIncrementalXmlError();
+  void recordParseXmlError();
 
   /**
    * Creates a new text block with the specified style.
@@ -340,6 +308,11 @@ class ChapterHtmlSlimParser {
                         const std::string& styleAttr);
   /** Current text layout width after inherited CSS margin/padding-left/right. */
   int activeBlockContentWidth() const;
+  /** Selects the semantic heading size relative to the active reader font. */
+  int headingFontIdForTag(const std::string& tagLower, const std::string& classAttr, const std::string& idAttr,
+                          const std::string& styleAttr) const;
+  /** Advances the active reader font by a capped number of available sizes. */
+  int headingFontIdForSteps(int steps) const;
   /** Current text x offset after inherited CSS margin/padding-left. */
   int activeBlockContentX() const;
   /** Captures the current CSS horizontal inset for the active text block. */
@@ -351,12 +324,8 @@ class ChapterHtmlSlimParser {
   int activeBlockFontId() const {
     return currentBlockFontId >= 0 ? currentBlockFontId : (inHeader ? headerFontId : fontId);
   }
-  /** Maps a CSS font-size em multiplier to a larger reader font id, or -1 to keep the default. */
-  int blockFontIdForEm(float em) const {
-    if (em >= 1.5f) return maxFontId;
-    if (em >= 1.2f) return headerFontId;
-    return -1;
-  }
+  /** Maps a CSS font-size em multiplier relative to the active block font, or -1 to keep the default. */
+  int blockFontIdForEm(float em) const;
 
   /**
    * Adds an image to the current page layout.
@@ -383,16 +352,25 @@ class ChapterHtmlSlimParser {
   TextBlock::Style resolveTextAlignFromAttributes(const XML_Char* elementName, const XML_Char** atts,
                                                   TextBlock::Style inheritedStyle) const;
 
-  /** Picks a block element's paragraph alignment: in FOLLOW_CSS mode the element's own text-align (else
-   *  justified); otherwise the user's fixed alignment, with an explicit element text-align still honored. */
+  /** Picks a block element's paragraph alignment from book CSS or the user's fixed alignment. */
   TextBlock::Style resolveBlockStyle(const XML_Char* elementName, const XML_Char** atts,
                                      bool elementHasExplicitTextAlign, TextBlock::Style elementCssStyle,
                                      TextBlock::Style inheritedCssStyle) const;
+  /** Applies book CSS text layout to every element except paragraphs in fixed reader-style mode. */
+  bool shouldApplyCssTextLayout(const std::string& tagLower) const;
 
   /**
    * Processes an img element with CSS class support.
    */
   void processImageElement(const char** atts);
+
+  /**
+   * Processes a CSS background image used as the content of a block element.
+   * Some EPUB title pages use an empty anchor/div with background-image rather
+   * than an <img> element (for example, a publisher logo).
+   */
+  void processBackgroundImageElement(const std::string& tagLower, const std::string& classAttr,
+                                    const std::string& idAttr, const std::string& styleAttr);
 
   static void XMLCALL startElement(void* userData, const XML_Char* name, const XML_Char** atts);
   static void XMLCALL characterData(void* userData, const XML_Char* s, int len);
@@ -440,9 +418,6 @@ class ChapterHtmlSlimParser {
         completePageFn(completePageFn),
         popupFn(popupFn),
         cssLoaded(false) {
-    // Reserve the normal nesting/table shapes once so resetStructuralStateForParsePass()
-    // and subsequent chapter work only clear contents instead of repeatedly growing
-    // these hot-path buffers.
     listNoIndentDepths_.reserve(8);
     cssAlignmentStack.reserve(16);
     cssAlignmentExplicitStack.reserve(16);
@@ -475,10 +450,10 @@ class ChapterHtmlSlimParser {
    */
   bool parseAndBuildPages(bool skipImageProcessing = false);
 
-  /** Begins a resumable SAX/layout pass. Call feedIncremental() in small chunks, then finishIncremental(). */
-  bool beginIncremental(bool skipImageProcessing = false);
-  bool feedIncremental(const uint8_t* data, size_t size);
-  bool finishIncremental();
-  void cancelIncremental();
-  bool incrementalActive() const { return incrementalParseActive_; }
+  /** Begins the SAX/layout pass used by the streaming EPUB parser. */
+  bool beginParse(bool skipImageProcessing = false);
+  bool feedParse(const uint8_t* data, size_t size);
+  bool finishParse();
+  void cancelParse();
+  bool parseActive() const { return parseActive_; }
 };

@@ -4,8 +4,6 @@
 #include <cstdlib>
 #include <cstring>
 
-// Hot per-pixel dithering math for every image render; opted into -O2 (see JpegRender.cpp for why - the
-// firmware otherwise builds with -Os). Placed after includes so it doesn't affect inlined header code.
 #pragma GCC optimize("O2")
 
 namespace {
@@ -24,7 +22,7 @@ inline int perceptualTone(const int gray) {
   return clamp255(gray);
 }
 
-}  // namespace
+}
 
 FourToneImageDitherer::FourToneImageDitherer(const int width) : width_(width) {
   if (width_ <= 0) {

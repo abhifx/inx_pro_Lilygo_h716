@@ -14,6 +14,7 @@
 #include <Serialization.h>
 
 #include <cstdio>
+#include <cctype>
 #include <cstring>
 #include <string>
 
@@ -40,27 +41,9 @@ void readAndValidate(FsFile& file, uint8_t& member, const uint8_t maxValue) {
 }
 
 namespace {
-constexpr uint8_t SETTINGS_FILE_VERSION = 42;
-// Reader-related fields (font/layout, status bar, refresh frequency, page auto-turn, image
-// grayscale, per-button reader actions, XTC reader settings, hyphenation, bionic reading, screen
-// margin, orientation, dictionary folder...) moved out to ReaderSetting/reader_settings.bin as of
-// this version. Files older than this used an incompatible field layout and can't be positionally
-// parsed, so loadFromFile() discards them and starts fresh instead of attempting to read them. See
-// ReaderSetting.cpp for the new reader_settings.bin format (independently versioned from 1).
-// Version 38 also removes an obsolete field, so older files are reset rather than
-// positionally parsed with a shifted layout.
-constexpr uint8_t MIN_SUPPORTED_SETTINGS_VERSION = 38;
-// Must equal the number of data fields read by the do-while loop in loadFromFile() (currently 46,
-// through thumbnailSize - NOT counting the version/count header fields read separately
-// before the loop). This is written into the file as its own "how many fields do I contain" header
-// and read back as fileSettingsCount; the loop's `settingsRead < fileSettingsCount` checks use it to
-// know whether the tail fields are actually present. If it's wrong, either the tail fields never get
-// read back even though they were written (undercount), or the file never triggers the self-healing
-// rewrite on old-format files (overcount, since fileSettingsCount can never reach it).
-constexpr uint8_t SETTINGS_COUNT = 46;
-constexpr uint8_t LEGACY_IMAGE_PRESENTATION_COUNT = 4;
+constexpr uint8_t SETTINGS_FILE_VERSION = 1;
+constexpr uint8_t SETTINGS_COUNT = 39;
 constexpr char SETTINGS_FILE[] = "/.system/settings.bin";
-constexpr char UI_THEME_FILE[] = "/.system/ui_theme.bin";
 constexpr uint32_t FNV1A_OFFSET = 2166136261UL;
 constexpr uint32_t FNV1A_PRIME = 16777619UL;
 
@@ -122,34 +105,22 @@ void sanitizeSleepCustomBmp(char* buf) {
   }
 }
 
-bool validRefreshFrequency(const uint8_t value) {
-  return value == 1 || value == 5 || value == 10 || value == 15 || value == 30;
-}
-
-void saveUiThemeSetting(const uint8_t value) {
-  FsFile file;
-  if (!SdMan.openFileForWrite("CPS", UI_THEME_FILE, file)) {
+void sanitizeTimeZoneId(char* buf) {
+  if (buf == nullptr) return;
+  if (strlen(buf) >= 64 || strstr(buf, "..") != nullptr) {
+    buf[0] = '\0';
     return;
   }
-  serialization::writePod(file, value);
-  file.close();
+  for (const char* p = buf; *p != '\0'; ++p) {
+    if (!(isalnum(static_cast<unsigned char>(*p)) || *p == '/' || *p == '_' || *p == '-' || *p == '+')) {
+      buf[0] = '\0';
+      return;
+    }
+  }
 }
 
-bool loadUiThemeSetting(uint8_t& value) {
-  FsFile file;
-  if (!SdMan.openFileForRead("CPS", UI_THEME_FILE, file)) {
-    return false;
-  }
-
-  uint8_t saved = SystemSetting::UI_THEME_CLASSIC;
-  serialization::readPod(file, saved);
-  file.close();
-
-  if (saved >= SystemSetting::UI_THEME_COUNT) {
-    return false;
-  }
-  value = saved;
-  return true;
+bool validRefreshFrequency(const uint8_t value) {
+  return value == 1 || value == 5 || value == 10 || value == 15 || value == 30;
 }
 
 uint32_t settingsHash(const SystemSetting& settings) {
@@ -158,7 +129,6 @@ uint32_t settingsHash(const SystemSetting& settings) {
   hashPod(hash, SETTINGS_COUNT);
   hashPod(hash, settings.sleepScreen);
   hashPod(hash, settings.shortPwrBtn);
-  hashPod(hash, settings.frontButtonLayout);
   hashPod(hash, settings.sideButtonLayout);
   hashPod(hash, settings.sleepTimeout);
   hashPod(hash, settings.sleepScreenCoverMode);
@@ -168,44 +138,38 @@ uint32_t settingsHash(const SystemSetting& settings) {
   hashString(hash, settings.opdsPassword);
   hashPod(hash, settings.sleepScreenCoverFilter);
   hashPod(hash, settings.useLibraryIndex);
-  hashPod(hash, settings.recentLibraryMode);
   hashPod(hash, settings.bootSetting);
   hashPod(hash, settings.sleepImageQuality);
   hashString(hash, settings.sleepCustomBmp);
-  hashPod(hash, settings.displayImageDither);
-  hashPod(hash, settings.legacyDisplayImagePresentation);
   hashPod(hash, settings.refreshOnLoadRecent);
   hashPod(hash, settings.refreshOnLoadLibrary);
   hashPod(hash, settings.refreshOnLoadSettings);
   hashPod(hash, settings.refreshOnLoadSync);
   hashPod(hash, settings.refreshOnLoadStatistics);
   hashPod(hash, settings.bitmapRoundedCorners);
-  hashPod(hash, settings.recentVisibleCount);
-  hashPod(hash, settings.librarySortEnabled);
   hashPod(hash, settings.librarySortMode);
   hashPod(hash, settings.libraryMode);
   hashPod(hash, settings.libraryViewMode);
   hashPod(hash, settings.sleepClockStyle);
   hashPod(hash, settings.sleepClockTimeFormat);
   hashPod(hash, settings.timeZoneQuarterOffset);
+  hashPod(hash, settings.timeZoneAutoDetectEnabled);
+  hashString(hash, settings.timeZoneId);
   hashPod(hash, settings.mainMenuNav);
-  hashPod(hash, settings.sleepClockRefreshInterval);
   hashPod(hash, settings.shakePageTurn);
   hashPod(hash, settings.shakePageTurnSensitivity);
-  hashPod(hash, settings.uiTheme);
-  hashPod(hash, settings.libraryShelfEnabled);
   hashPod(hash, settings.showMenuClock);
   hashPod(hash, settings.keyboardLayout);
   hashPod(hash, settings.systemTextSize);
-  hashPod(hash, settings.shortPressPowerButton);
   hashPod(hash, settings.darkMode);
   hashPod(hash, settings.hideThumbnailTitles);
   hashPod(hash, settings.hideFinishedBooks);
   hashPod(hash, settings.thumbnailSize);
+  hashString(hash, settings.languageCode);
   return hash;
 }
 
-}  // namespace
+}
 
 const char* SystemSetting::readerButtonActionLabel(const uint8_t action) {
   static const char* const kLabels[] = {"None",
@@ -224,7 +188,8 @@ const char* SystemSetting::readerButtonActionLabel(const uint8_t action) {
                                         "Quick Actions",
                                         "Generate Full Data",
                                         "Generate Thumbnail",
-                                        "Go to Percent"};
+                                        "Go to Percent",
+                                        "Toggle Light"};
   if (action >= SystemSetting::READER_BUTTON_ACTION_COUNT) {
     return "None";
   }
@@ -248,27 +213,18 @@ void SystemSetting::setSleepCustomBmpFromInput(const char* s) {
 bool SystemSetting::saveToFile() const {
   {
     SystemSetting* mut = const_cast<SystemSetting*>(this);
-    if (mut->recentVisibleCount < 1 || mut->recentVisibleCount > 9) mut->recentVisibleCount = 9;
-    if (mut->librarySortEnabled > 1) mut->librarySortEnabled = 1;
-    if (mut->libraryShelfEnabled > 1) mut->libraryShelfEnabled = 0;
     if (mut->librarySortMode > 7) mut->librarySortMode = 0;
     if (mut->libraryMode >= LIBRARY_MODE_COUNT) mut->libraryMode = LIBRARY_GRID;
-    if (mut->libraryViewMode >= LIBRARY_VIEW_MODE_COUNT ||
-        (mut->libraryViewMode == LIBRARY_VIEW_SHELF && mut->libraryShelfEnabled == 0))
+    if (mut->libraryViewMode >= LIBRARY_VIEW_MODE_COUNT)
       mut->libraryViewMode = LIBRARY_VIEW_FOLDERS;
     if (mut->sleepClockStyle >= SLEEP_CLOCK_STYLE_COUNT) mut->sleepClockStyle = CLOCK_CENTERED_DATE;
     if (mut->sleepClockTimeFormat >= CLOCK_TIME_FORMAT_COUNT) mut->sleepClockTimeFormat = CLOCK_24_HOUR;
-    if (mut->sleepClockRefreshInterval >= CLOCK_REFRESH_INTERVAL_COUNT)
-      mut->sleepClockRefreshInterval = CLOCK_REFRESH_OFF;
     if (mut->sleepImageQuality >= SLEEP_IMAGE_QUALITY_COUNT) mut->sleepImageQuality = SLEEP_IMAGE_HIGH;
     if (mut->timeZoneQuarterOffset > 104) mut->timeZoneQuarterOffset = 80;
     if (mut->shakePageTurn > 2) mut->shakePageTurn = 0;
     if (mut->shakePageTurnSensitivity > 2) mut->shakePageTurnSensitivity = 1;
     if (mut->keyboardLayout >= KEYBOARD_LAYOUT_COUNT) mut->keyboardLayout = KEYBOARD_QWERTY;
     if (mut->thumbnailSize >= THUMBNAIL_SIZE_COUNT) mut->thumbnailSize = THUMBNAIL_ACTUAL;
-    // The old field remains serialized so existing settings files keep their
-    // layout, but Classic is no longer a supported UI mode.
-    mut->uiTheme = UI_THEME_BOTTOM_TABS;
   }
 
   const uint32_t currentHash = settingsHash(*this);
@@ -289,7 +245,6 @@ bool SystemSetting::saveToFile() const {
   serialization::writePod(outputFile, SETTINGS_COUNT);
   serialization::writePod(outputFile, sleepScreen);
   serialization::writePod(outputFile, shortPwrBtn);
-  serialization::writePod(outputFile, frontButtonLayout);
   serialization::writePod(outputFile, sideButtonLayout);
   serialization::writePod(outputFile, sleepTimeout);
   serialization::writePod(outputFile, sleepScreenCoverMode);
@@ -299,20 +254,15 @@ bool SystemSetting::saveToFile() const {
   serialization::writeString(outputFile, std::string(opdsPassword));
   serialization::writePod(outputFile, sleepScreenCoverFilter);
   serialization::writePod(outputFile, useLibraryIndex);
-  serialization::writePod(outputFile, recentLibraryMode);
   serialization::writePod(outputFile, bootSetting);
   serialization::writePod(outputFile, sleepImageQuality);
   serialization::writeString(outputFile, std::string(sleepCustomBmp));
-  serialization::writePod(outputFile, displayImageDither);
-  serialization::writePod(outputFile, legacyDisplayImagePresentation);
   serialization::writePod(outputFile, refreshOnLoadRecent);
   serialization::writePod(outputFile, refreshOnLoadLibrary);
   serialization::writePod(outputFile, refreshOnLoadSettings);
   serialization::writePod(outputFile, refreshOnLoadSync);
   serialization::writePod(outputFile, refreshOnLoadStatistics);
   serialization::writePod(outputFile, bitmapRoundedCorners);
-  serialization::writePod(outputFile, recentVisibleCount);
-  serialization::writePod(outputFile, librarySortEnabled);
   serialization::writePod(outputFile, librarySortMode);
   serialization::writePod(outputFile, libraryMode);
   serialization::writePod(outputFile, libraryViewMode);
@@ -320,22 +270,20 @@ bool SystemSetting::saveToFile() const {
   serialization::writePod(outputFile, sleepClockTimeFormat);
   serialization::writePod(outputFile, timeZoneQuarterOffset);
   serialization::writePod(outputFile, mainMenuNav);
-  serialization::writePod(outputFile, sleepClockRefreshInterval);
   serialization::writePod(outputFile, shakePageTurn);
   serialization::writePod(outputFile, shakePageTurnSensitivity);
-  serialization::writePod(outputFile, uiTheme);
-  serialization::writePod(outputFile, libraryShelfEnabled);
   serialization::writePod(outputFile, showMenuClock);
   serialization::writePod(outputFile, keyboardLayout);
   serialization::writePod(outputFile, systemTextSize);
-  serialization::writePod(outputFile, shortPressPowerButton);
   serialization::writePod(outputFile, darkMode);
   serialization::writePod(outputFile, hideThumbnailTitles);
   serialization::writePod(outputFile, hideFinishedBooks);
   serialization::writePod(outputFile, thumbnailSize);
+  serialization::writePod(outputFile, timeZoneAutoDetectEnabled);
+  serialization::writeString(outputFile, std::string(timeZoneId));
+  serialization::writeString(outputFile, std::string(languageCode));
 
   outputFile.close();
-  saveUiThemeSetting(uiTheme);
 
   INX_SERIAL.printf("[%lu] [CPS] Settings saved to file (version %u)\n", millis(), SETTINGS_FILE_VERSION);
   return true;
@@ -356,17 +304,26 @@ bool SystemSetting::loadFromFile() {
   uint8_t version;
   serialization::readPod(inputFile, version);
 
-  if (version > SETTINGS_FILE_VERSION || version < MIN_SUPPORTED_SETTINGS_VERSION) {
-    INX_SERIAL.printf("[%lu] [CPS] Deserialization failed: Unsupported version %u (expected %u-%u)\n", millis(), version,
-                  MIN_SUPPORTED_SETTINGS_VERSION, SETTINGS_FILE_VERSION);
+  if (version != SETTINGS_FILE_VERSION) {
+    INX_SERIAL.printf("[%lu] [CPS] Deserialization failed: Unsupported version %u (expected %u)\n", millis(), version,
+                      SETTINGS_FILE_VERSION);
     inputFile.close();
+    SdMan.remove(SETTINGS_FILE);
+    saveToFile();
     return false;
   }
 
   uint8_t fileSettingsCount = 0;
   serialization::readPod(inputFile, fileSettingsCount);
 
-  const bool shouldRewriteSettings = version < SETTINGS_FILE_VERSION || fileSettingsCount < SETTINGS_COUNT;
+  if (fileSettingsCount != SETTINGS_COUNT) {
+    INX_SERIAL.printf("[%lu] [CPS] Deserialization failed: Expected %u settings, found %u\n", millis(),
+                      SETTINGS_COUNT, fileSettingsCount);
+    inputFile.close();
+    SdMan.remove(SETTINGS_FILE);
+    saveToFile();
+    return false;
+  }
   uint8_t settingsRead = 0;
 
   do {
@@ -374,9 +331,6 @@ bool SystemSetting::loadFromFile() {
     if (++settingsRead >= fileSettingsCount) break;
 
     readAndValidate(inputFile, shortPwrBtn, SHORT_PWRBTN_COUNT);
-    if (++settingsRead >= fileSettingsCount) break;
-
-    readAndValidate(inputFile, frontButtonLayout, FRONT_BUTTON_LAYOUT_COUNT);
     if (++settingsRead >= fileSettingsCount) break;
 
     readAndValidate(inputFile, sideButtonLayout, SIDE_BUTTON_LAYOUT_COUNT);
@@ -421,9 +375,6 @@ bool SystemSetting::loadFromFile() {
     serialization::readPod(inputFile, useLibraryIndex);
     if (++settingsRead >= fileSettingsCount) break;
 
-    readAndValidate(inputFile, recentLibraryMode, RECENT_LIBRARY_MODE_COUNT);
-    if (++settingsRead >= fileSettingsCount) break;
-
     readAndValidate(inputFile, bootSetting, BOOT_SETTING_COUNT);
     if (++settingsRead >= fileSettingsCount) break;
 
@@ -436,12 +387,6 @@ bool SystemSetting::loadFromFile() {
       serialization::readString(inputFile, sleepBmpStr);
       setSleepCustomBmpFromInput(sleepBmpStr.c_str());
     }
-    if (++settingsRead >= fileSettingsCount) break;
-
-    readAndValidate(inputFile, displayImageDither, READER_IMAGE_DITHER_COUNT);
-    if (++settingsRead >= fileSettingsCount) break;
-
-    readAndValidate(inputFile, legacyDisplayImagePresentation, LEGACY_IMAGE_PRESENTATION_COUNT);
     if (++settingsRead >= fileSettingsCount) break;
 
     serialization::readPod(inputFile, refreshOnLoadRecent);
@@ -468,14 +413,6 @@ bool SystemSetting::loadFromFile() {
     if (bitmapRoundedCorners > 2) bitmapRoundedCorners = 0;
     if (++settingsRead >= fileSettingsCount) break;
 
-    serialization::readPod(inputFile, recentVisibleCount);
-    if (recentVisibleCount < 1 || recentVisibleCount > 9) recentVisibleCount = 9;
-    if (++settingsRead >= fileSettingsCount) break;
-
-    serialization::readPod(inputFile, librarySortEnabled);
-    if (librarySortEnabled > 1) librarySortEnabled = 1;
-    if (++settingsRead >= fileSettingsCount) break;
-
     serialization::readPod(inputFile, librarySortMode);
     if (librarySortMode > 7) librarySortMode = 0;
     if (++settingsRead >= fileSettingsCount) break;
@@ -499,22 +436,12 @@ bool SystemSetting::loadFromFile() {
     readAndValidate(inputFile, mainMenuNav, MAIN_MENU_NAV_COUNT);
     if (++settingsRead >= fileSettingsCount) break;
 
-    readAndValidate(inputFile, sleepClockRefreshInterval, CLOCK_REFRESH_INTERVAL_COUNT);
-    if (++settingsRead >= fileSettingsCount) break;
-
     serialization::readPod(inputFile, shakePageTurn);
     if (shakePageTurn > 2) shakePageTurn = 0;
     if (++settingsRead >= fileSettingsCount) break;
 
     serialization::readPod(inputFile, shakePageTurnSensitivity);
     if (shakePageTurnSensitivity > 2) shakePageTurnSensitivity = 1;
-    if (++settingsRead >= fileSettingsCount) break;
-
-    readAndValidate(inputFile, uiTheme, UI_THEME_COUNT);
-    if (++settingsRead >= fileSettingsCount) break;
-
-    serialization::readPod(inputFile, libraryShelfEnabled);
-    if (libraryShelfEnabled > 1) libraryShelfEnabled = 0;
     if (++settingsRead >= fileSettingsCount) break;
 
     serialization::readPod(inputFile, showMenuClock);
@@ -525,11 +452,6 @@ bool SystemSetting::loadFromFile() {
     ++settingsRead;
     if (settingsRead < fileSettingsCount) {
       readAndValidate(inputFile, systemTextSize, SYSTEM_TEXT_SIZE_COUNT);
-      ++settingsRead;
-    }
-    if (settingsRead < fileSettingsCount) {
-      serialization::readPod(inputFile, shortPressPowerButton);
-      if (shortPressPowerButton > 1) shortPressPowerButton = 0;
       ++settingsRead;
     }
     if (settingsRead < fileSettingsCount) {
@@ -552,18 +474,42 @@ bool SystemSetting::loadFromFile() {
       if (thumbnailSize >= THUMBNAIL_SIZE_COUNT) thumbnailSize = THUMBNAIL_ACTUAL;
       ++settingsRead;
     }
+    if (settingsRead < fileSettingsCount) {
+      serialization::readPod(inputFile, timeZoneAutoDetectEnabled);
+      if (timeZoneAutoDetectEnabled > 1) timeZoneAutoDetectEnabled = 1;
+      ++settingsRead;
+    }
+    if (settingsRead < fileSettingsCount) {
+      std::string loadedTimeZoneId;
+      serialization::readString(inputFile, loadedTimeZoneId);
+      if (loadedTimeZoneId.size() < sizeof(timeZoneId)) {
+        std::strncpy(timeZoneId, loadedTimeZoneId.c_str(), sizeof(timeZoneId) - 1);
+        timeZoneId[sizeof(timeZoneId) - 1] = '\0';
+      } else {
+        timeZoneId[0] = '\0';
+      }
+      sanitizeTimeZoneId(timeZoneId);
+      ++settingsRead;
+    }
+    if (settingsRead < fileSettingsCount) {
+      std::string loadedLanguageCode;
+      serialization::readString(inputFile, loadedLanguageCode);
+      if (loadedLanguageCode.size() < sizeof(languageCode)) {
+        std::strncpy(languageCode, loadedLanguageCode.c_str(), sizeof(languageCode) - 1);
+        languageCode[sizeof(languageCode) - 1] = '\0';
+      } else {
+        languageCode[0] = '\0';
+      }
+      ++settingsRead;
+    }
 
   } while (false);
 
   inputFile.close();
 
-  if (recentVisibleCount < 1 || recentVisibleCount > 9) recentVisibleCount = 9;
-  if (librarySortEnabled > 1) librarySortEnabled = 1;
-  if (libraryShelfEnabled > 1) libraryShelfEnabled = 0;
   if (showMenuClock > 1) showMenuClock = 1;
   if (keyboardLayout >= KEYBOARD_LAYOUT_COUNT) keyboardLayout = KEYBOARD_QWERTY;
   if (systemTextSize >= SYSTEM_TEXT_SIZE_COUNT) systemTextSize = SYSTEM_TEXT_SMALL;
-  if (shortPressPowerButton > 1) shortPressPowerButton = 0;
   if (darkMode > 1) darkMode = 0;
   if (hideThumbnailTitles > 1) hideThumbnailTitles = 0;
   if (hideFinishedBooks > 1) hideFinishedBooks = 0;
@@ -571,25 +517,16 @@ bool SystemSetting::loadFromFile() {
   if (librarySortMode > 7) librarySortMode = 0;
   if (sleepClockStyle >= SLEEP_CLOCK_STYLE_COUNT) sleepClockStyle = CLOCK_CENTERED_DATE;
   if (sleepClockTimeFormat >= CLOCK_TIME_FORMAT_COUNT) sleepClockTimeFormat = CLOCK_24_HOUR;
-  if (sleepClockRefreshInterval >= CLOCK_REFRESH_INTERVAL_COUNT) sleepClockRefreshInterval = CLOCK_REFRESH_OFF;
   if (sleepImageQuality >= SLEEP_IMAGE_QUALITY_COUNT) sleepImageQuality = SLEEP_IMAGE_HIGH;
   if (timeZoneQuarterOffset > 104) timeZoneQuarterOffset = 80;
+  if (timeZoneAutoDetectEnabled > 1) timeZoneAutoDetectEnabled = 1;
+  sanitizeTimeZoneId(timeZoneId);
   if (libraryMode >= LIBRARY_MODE_COUNT) libraryMode = LIBRARY_GRID;
-  if (libraryViewMode >= LIBRARY_VIEW_MODE_COUNT ||
-      (libraryViewMode == LIBRARY_VIEW_SHELF && libraryShelfEnabled == 0)) {
+  if (libraryViewMode >= LIBRARY_VIEW_MODE_COUNT) {
     libraryViewMode = LIBRARY_VIEW_FOLDERS;
   }
-  // Ignore the legacy theme value and normalize it so a pre-bottom-tabs
-  // settings file cannot put the device back into the removed Classic layout.
-  uiTheme = UI_THEME_BOTTOM_TABS;
-  loadUiThemeSetting(uiTheme);
-  uiTheme = UI_THEME_BOTTOM_TABS;
 
   INX_SERIAL.printf("[%lu] [CPS] Settings loaded (version %u, %u items)\n", millis(), version, settingsRead);
-
-  if (shouldRewriteSettings) {
-    saveToFile();
-  }
 
   return true;
 }

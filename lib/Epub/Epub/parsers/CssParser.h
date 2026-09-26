@@ -7,8 +7,10 @@
 
 #include <SdFat.h>
 
+#include <array>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -42,8 +44,6 @@ class CssParser {
   CssParser();
   ~CssParser();
 
-  // minFreeHeapBytes > 0: stop adding rules once free heap would drop below it, reserving heap for rendering
-  // (image decode etc.) so a large stylesheet can't exhaust memory and abort.
   void parse(const std::string& cssContent, const std::string& sourcePath = "", uint32_t minFreeHeapBytes = 0,
              const UsageFilter* usageFilter = nullptr);
   void clear();
@@ -51,17 +51,17 @@ class CssParser {
   bool loadBinary(FsFile& file);
 
   int getWidth(const std::string& className, const std::string& id, const std::string& styleAttr, int viewportWidth,
-               int viewportHeight) const;
+               int viewportHeight, const std::string& elementTagLower = "") const;
   int getHeight(const std::string& className, const std::string& id, const std::string& styleAttr, int viewportWidth,
-                int viewportHeight) const;
+                int viewportHeight, const std::string& elementTagLower = "") const;
   int getMaxWidth(const std::string& className, const std::string& id, const std::string& styleAttr, int viewportWidth,
-                  int viewportHeight) const;
+                  int viewportHeight, const std::string& elementTagLower = "") const;
   int getMinWidth(const std::string& className, const std::string& id, const std::string& styleAttr, int viewportWidth,
-                  int viewportHeight) const;
+                  int viewportHeight, const std::string& elementTagLower = "") const;
   int getMaxHeight(const std::string& className, const std::string& id, const std::string& styleAttr, int viewportWidth,
-                   int viewportHeight) const;
+                   int viewportHeight, const std::string& elementTagLower = "") const;
   int getMinHeight(const std::string& className, const std::string& id, const std::string& styleAttr, int viewportWidth,
-                   int viewportHeight) const;
+                   int viewportHeight, const std::string& elementTagLower = "") const;
 
   /**
    * Parse a single CSS length (e.g. HTML width="50%" or style value).
@@ -92,11 +92,23 @@ class CssParser {
   /** Resolved inherited CSS font emphasis for the current element. */
   bool resolveFontBold(const std::string& elementTagLower, const std::string& className, const std::string& id,
                        const std::string& styleAttr, bool inheritedBold) const;
+  /** True when font-size is explicitly present inline or in a matching stylesheet rule. */
+  bool hasFontSizeSpecified(const std::string& elementTagLower, const std::string& className,
+                            const std::string& id, const std::string& styleAttr) const;
   bool resolveFontItalic(const std::string& elementTagLower, const std::string& className, const std::string& id,
                          const std::string& styleAttr, bool inheritedItalic) const;
   bool resolveSmallCaps(const std::string& elementTagLower, const std::string& className, const std::string& id,
                         const std::string& styleAttr, bool inheritedSmallCaps) const;
   bool hasFirstLetterDropCapHint(const std::string& elementTagLower, const std::string& className,
+                                 const std::string& id, const std::string& styleAttr) const;
+  /** Resolved font-size multiplier for a matching ::first-letter rule, or 0 when none is specified. */
+  float getFirstLetterFontSizeEm(const std::string& elementTagLower, const std::string& className,
+                                 const std::string& id, const std::string& styleAttr) const;
+  /** Resolved unitless line-height multiplier for ::first-letter, or 0 when none is specified. */
+  float getFirstLetterLineHeightEm(const std::string& elementTagLower, const std::string& className,
+                                   const std::string& id, const std::string& styleAttr) const;
+  /** Resolved first-letter CSS color as reader tone: 0 white, 1 black, 2 gray. */
+  uint8_t getFirstLetterTextTone(const std::string& elementTagLower, const std::string& className,
                                  const std::string& id, const std::string& styleAttr) const;
   uint8_t getFirstLetterDropCapLineCount(const std::string& elementTagLower, const std::string& className,
                                          const std::string& id, const std::string& styleAttr) const;
@@ -195,8 +207,8 @@ class CssParser {
    */
   struct MatchedRule {
     const CssRule* rule;
-    uint8_t tier;     // 2 = id selector, 1 = class selector, 0 = type selector
-    bool contextual;  // selector had an unverifiable combinator; ranks below a plain selector of the same tier
+    uint8_t tier;
+    bool contextual;
   };
   mutable std::string mcTag_;
   mutable std::string mcClass_;
@@ -204,20 +216,22 @@ class CssParser {
   mutable std::vector<MatchedRule> mcMatched_;
   mutable bool mcValid_ = false;
 
+  /** Cache all winning declarations while the current element's matched rules are active. */
+  struct WinningRuleCacheTable {
+    std::array<const CssRule*, 256> winners{};
+    std::array<int8_t, 256> priorities{};
+    std::array<bool, 256> present{};
+    bool valid = false;
+  };
+  // Keep the large per-element tables off ChapterHtmlSlimParser's task stack.
+  mutable std::unique_ptr<WinningRuleCacheTable[]> winningRuleCache_;
   struct SelectorIndexEntry {
     std::string key;
     std::vector<uint16_t> rules;
   };
-  // Selector matching is based on the selector's final compound.  Index its
-  // concrete tag/class/id keys so normal EPUB CSS no longer needs a full-rule
-  // scan for each parsed element; final matching still verifies exact CSS
-  // semantics and cascade order.
   mutable std::vector<SelectorIndexEntry> tagRuleIndex_;
   mutable std::vector<SelectorIndexEntry> classRuleIndex_;
   mutable std::vector<SelectorIndexEntry> idRuleIndex_;
-  // Rules whose final selector compound is universal/attribute-only must be
-  // checked for every element.  Keeping this small fallback list preserves
-  // CSS correctness without returning to a full stylesheet scan.
   mutable std::vector<uint16_t> fallbackRuleIndexes_;
   mutable bool selectorIndexValid_ = false;
   void rebuildSelectorIndex() const;
@@ -227,10 +241,6 @@ class CssParser {
   const std::vector<MatchedRule>& matchedRulesFor(const std::string& elementTagLower, const std::string& className,
                                                   const std::string& id) const;
 
-  // Winning stylesheet rule that defines propName for this element, by cascade tier (id>class>type, last match
-  // wins). Returns nullptr if no matched rule sets it. Inline styles are handled by the callers, not here.
-  // ignoreContextual: skip combinator selectors (e.g. ".box p") we cannot verify — used for text-align so an
-  // unverifiable scoped rule never forces an alignment; the element inherits instead.
   const CssRule* winningRuleForProperty(const std::string& propName, const std::string& className,
                                         const std::string& id, const std::string& elementTagLower,
                                         bool ignoreContextual = false) const;
@@ -252,7 +262,8 @@ class CssParser {
                           PercentRefersTo percentAxis) const;
   void parseInlineStyle(const std::string& styleAttr, std::map<std::string, std::string>& out) const;
   int getInlineOrSheetLength(const std::string& propName, const std::string& className, const std::string& id,
-                             const std::string& styleAttr, int viewportWidth, int viewportHeight) const;
+                             const std::string& styleAttr, int viewportWidth, int viewportHeight,
+                             const std::string& elementTagLower) const;
   int getSpacingEdgePx(const std::string& propName, const std::string& shorthandName, const std::string& className,
                        const std::string& id, const std::string& styleAttr, int viewportWidth, int viewportHeight,
                        const std::string& elementTagLower = "") const;

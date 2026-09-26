@@ -22,6 +22,7 @@
 #include "state/RecentBooks.h"
 #include "state/SystemSetting.h"
 #include "system/Fonts.h"
+#include "system/LanguageManager.h"
 #include "system/MappedInputManager.h"
 
 namespace {
@@ -149,7 +150,7 @@ void writeBackupMarker() {
     marker.close();
   }
 }
-}  // namespace
+}
 
 void BackupRestoreActivity::onEnter() {
   ActivityWithSubactivity::onEnter();
@@ -275,7 +276,8 @@ void BackupRestoreActivity::renderDone() {
                          true, EpdFontFamily::BOLD);
 
   char line[80];
-  snprintf(line, sizeof(line), "%d copied, %d skipped, %d failed", copiedCount_, skippedCount_, failedCount_);
+  snprintf(line, sizeof(line), LanguageManager::translateText("%d copied, %d skipped, %d failed"), copiedCount_,
+           skippedCount_, failedCount_);
   renderer.text.centered(systemFontId(), centerY, line, true);
   renderer.text.centered(kMetaFont, centerY + 34,
                          ok ? (action_ == Action::Backup ? "Saved in /.system/backup" : "State restored from backup")
@@ -337,7 +339,6 @@ void BackupRestoreActivity::reloadStoresAfterRestore() {
   SETTINGS.loadFromFile();
   READER_SETTINGS.loadFromFile();
   RECENT_BOOKS.loadFromFile();
-  // BookState no longer caches anything in RAM - every call already reads fresh from books.bin.
   WIFI_STORE.loadFromFile();
   OPDS_STORE.loadFromFile();
   KOREADER_STORE.loadFromFile();

@@ -38,10 +38,10 @@ Statistics::Statistics(GfxRenderer& renderer, MappedInputManager& mappedInput, s
 namespace {
 
 constexpr int FONT_SANS_SM = MONTSERRAT_8_FONT_ID;
-constexpr int FONT_SERIF = CHAREINK_14_FONT_ID;
-constexpr int FONT_SERIF_MD = CHAREINK_16_FONT_ID;
-constexpr int FONT_SERIF_LG = CHAREINK_18_FONT_ID;
-constexpr int FONT_SERIF_SM = CHAREINK_12_FONT_ID;
+constexpr int FONT_SERIF = MONTSERRAT_14_FONT_ID;
+constexpr int FONT_SERIF_MD = MONTSERRAT_16_FONT_ID;
+constexpr int FONT_SERIF_LG = MONTSERRAT_18_FONT_ID;
+constexpr int FONT_SERIF_SM = MONTSERRAT_12_FONT_ID;
 constexpr float kPi = 3.14159265f;
 
 ButtonBounds refreshButton(const GfxRenderer& renderer) {
@@ -424,7 +424,7 @@ int drawFourColumnStats2x2(const GfxRenderer& renderer, int innerLeft, int y, in
   return drawFourColumnStatsNx2(renderer, innerLeft, y, innerW, vals, labs, 2, cellH, row0LiftPx, 0);
 }
 
-}  // namespace
+}
 
 void Statistics::loadStats() {
   ScreenComponents::LoadingProgressLayout layout =
@@ -988,9 +988,6 @@ void Statistics::loop() {
         updateRequired = true;
         return;
       }
-      // Statistics is a sub-page. Ordinary taps belong to this screen and
-      // must not be returned to Page's shared navigation input on a later
-      // loop, where a lower-right tap can be interpreted as Search.
       renderPage();
       return;
     }

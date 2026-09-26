@@ -22,7 +22,7 @@ constexpr int kHitPadding = 8;
 constexpr unsigned long kNavEdgeDebounceMs = 130;
 constexpr unsigned long kNavRepeatInitialMs = 700;
 constexpr unsigned long kNavRepeatIntervalMs = 95;
-}  // namespace
+}
 
 void WordLookup::CaptureBufferDeleter::operator()(uint8_t* buffer) const {
   if (!buffer) return;
@@ -261,4 +261,15 @@ bool WordLookup::restoreFramebuffer(EpubActivity& activity) const {
     std::memcpy(framebuffer + offset, captureChunks_[i].get(), bytes);
   }
   return true;
+}
+
+void WordLookup::clearFramebufferCapture() {
+  for (auto& chunk : captureChunks_) {
+    chunk.reset();
+  }
+  std::vector<CaptureBuffer>().swap(captureChunks_);
+  captureMonolithic_.reset();
+  captureUsesMonolithic_ = false;
+  captureBytes_ = 0;
+  captureValid_ = false;
 }

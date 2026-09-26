@@ -6,7 +6,9 @@
 #include "Settings.h"
 
 #include <cmath>
+#include <cstdio>
 #include <GfxRenderer.h>
+#include <string>
 #include <vector>
 
 #include "activity/page/navigation/Menu.h"
@@ -44,8 +46,6 @@ int panelSystemX(const GfxRenderer& renderer) {
 
 void renderPanelTab(const GfxRenderer& renderer, const int x, const int y, const int width, const int height,
                     const char* label, const bool selected, const bool roundLeft, const bool roundRight) {
-  // Draw a square tab first, then erase only the pixels outside the requested
-  // outer corner arcs. This avoids adding a second stroke on either inner edge.
   constexpr int corner = 4;
   const int tone = selected ? static_cast<int>(GfxRenderer::FillTone::Ink)
                             : static_cast<int>(GfxRenderer::FillTone::Paper);
@@ -82,10 +82,11 @@ void renderPanelTab(const GfxRenderer& renderer, const int x, const int y, const
   }
 
   const int font = systemFontId();
-  const int textWidth = renderer.text.getWidth(font, label ? label : "");
+  const std::string shown = renderer.text.truncate(font, label ? label : "", std::max(1, width - 16));
+  const int textWidth = renderer.text.getUntranslatedWidth(font, shown.c_str());
   const int textY = y + (height - renderer.text.getLineHeight(font)) / 2;
   const int textX = x + (width - textWidth) / 2;
-  renderer.text.render(font, textX, textY, label ? label : "", !selected, EpdFontFamily::REGULAR);
+  renderer.text.renderUntranslated(font, textX, textY, shown.c_str(), !selected, EpdFontFamily::REGULAR);
 }
 
 std::vector<SettingInfo> buildSystemSettings() {
@@ -106,8 +107,6 @@ std::vector<SettingInfo> buildSystemSettings() {
                                        GroupType::DEVICE_DISPLAY));
   settings.push_back(SettingInfo::Toggle("Hide title for thumbnails", &SystemSetting::hideThumbnailTitles,
                                          GroupType::DEVICE_DISPLAY));
-  settings.push_back(SettingInfo::Enum("Thumbnail size", &SystemSetting::thumbnailSize, {"Actual", "Even"},
-                                       GroupType::DEVICE_DISPLAY));
 
   settings.push_back(SettingInfo::Separator("Clock", GroupType::CLOCK));
   settings.push_back(SettingInfo::Action("Face", GroupType::CLOCK));
@@ -133,19 +132,22 @@ std::vector<SettingInfo> buildSystemSettings() {
                                        GroupType::DEVICE_ADVANCED));
   settings.push_back(SettingInfo::Enum("Boot Mode", &SystemSetting::bootSetting, {"Recent Book", "Home Page"},
                                        GroupType::DEVICE_ADVANCED));
+  settings.push_back(SettingInfo::Action("Language", GroupType::DEVICE_ADVANCED));
 #if FREEINK_DEVICE_STICKY
   settings.push_back(SettingInfo::Enum("Flick page turn", &SystemSetting::shakePageTurn,
                                        {"Off", "Normal", "Inverted"}, GroupType::DEVICE_ADVANCED));
   settings.push_back(SettingInfo::Enum("Flick sensitivity", &SystemSetting::shakePageTurnSensitivity,
                                        {"Low", "Normal", "High"}, GroupType::DEVICE_ADVANCED));
 #endif
-  settings.push_back(SettingInfo::Toggle("Short Press Power Button", &SystemSetting::shortPressPowerButton,
-                                         GroupType::DEVICE_ADVANCED));
+  settings.push_back(SettingInfo::Enum("Short Press Power Button", &SystemSetting::shortPwrBtn,
+                                       {"Sleep", "Refresh"},
+                                       {SystemSetting::SHORT_PWRBTN::SLEEP,
+                                        SystemSetting::SHORT_PWRBTN::PAGE_REFRESH},
+                                       GroupType::DEVICE_ADVANCED));
 
   settings.push_back(SettingInfo::Separator("Actions", GroupType::DEVICE_ACTIONS));
   settings.push_back(SettingInfo::Action("Delete Cache", GroupType::DEVICE_ACTIONS));
-  settings.push_back(SettingInfo::Action("Generate thumbnails", GroupType::DEVICE_ACTIONS));
-  settings.push_back(SettingInfo::Action("Generate Authors", GroupType::DEVICE_ACTIONS));
+  settings.push_back(SettingInfo::Action("Generate Metadata", GroupType::DEVICE_ACTIONS));
   return settings;
 }
 
@@ -153,7 +155,7 @@ const char* panelBackLabel(const SettingsPanel panel) {
   return panel == SettingsPanel::System ? "\xC2\xAB Reader" : "\xC2\xAB System";
 }
 
-}  // namespace
+}
 
 Settings::Settings(GfxRenderer& renderer, MappedInputManager& mappedInput) : Page("Settings", renderer, mappedInput) {}
 

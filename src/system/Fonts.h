@@ -5,27 +5,6 @@
  * @brief Built-in bitmap font headers and numeric font IDs.
  */
 
-#include "font/atkinson_hyperlegible_10_bold.h"
-#include "font/atkinson_hyperlegible_10_bolditalic.h"
-#include "font/atkinson_hyperlegible_10_italic.h"
-#include "font/atkinson_hyperlegible_10_regular.h"
-#include "font/atkinson_hyperlegible_12_bold.h"
-#include "font/atkinson_hyperlegible_12_bolditalic.h"
-#include "font/atkinson_hyperlegible_12_italic.h"
-#include "font/atkinson_hyperlegible_12_regular.h"
-#include "font/atkinson_hyperlegible_14_bold.h"
-#include "font/atkinson_hyperlegible_14_bolditalic.h"
-#include "font/atkinson_hyperlegible_14_italic.h"
-#include "font/atkinson_hyperlegible_14_regular.h"
-#include "font/atkinson_hyperlegible_16_bold.h"
-#include "font/atkinson_hyperlegible_16_bolditalic.h"
-#include "font/atkinson_hyperlegible_16_italic.h"
-#include "font/atkinson_hyperlegible_16_regular.h"
-#include "font/atkinson_hyperlegible_18_bold.h"
-#include "font/atkinson_hyperlegible_18_bolditalic.h"
-#include "font/atkinson_hyperlegible_18_italic.h"
-#include "font/atkinson_hyperlegible_18_regular.h"
-#include "font/atkinson_hyperlegible_8_regular.h"
 #include "font/montserrat_10_bold.h"
 #include "font/montserrat_10_bolditalic.h"
 #include "font/montserrat_10_italic.h"
@@ -47,37 +26,10 @@
 #include "font/montserrat_18_italic.h"
 #include "font/montserrat_18_regular.h"
 #include "font/montserrat_8_regular.h"
-#include "font/chareink_10_bold.h"
-#include "font/chareink_10_bolditalic.h"
-#include "font/chareink_10_italic.h"
-#include "font/chareink_10_regular.h"
-#include "font/chareink_12_bold.h"
-#include "font/chareink_12_bolditalic.h"
-#include "font/chareink_12_italic.h"
-#include "font/chareink_12_regular.h"
-#include "font/chareink_14_bold.h"
-#include "font/chareink_14_bolditalic.h"
-#include "font/chareink_14_italic.h"
-#include "font/chareink_14_regular.h"
-#include "font/chareink_16_bold.h"
-#include "font/chareink_16_bolditalic.h"
-#include "font/chareink_16_italic.h"
-#include "font/chareink_16_regular.h"
-#include "font/chareink_18_bold.h"
-#include "font/chareink_18_bolditalic.h"
-#include "font/chareink_18_italic.h"
-#include "font/chareink_18_regular.h"
 #include "font/montserrat_clock_70_bold.h"
 #include "font/montserrat_clock_70_regular.h"
 
 #include "state/SystemSetting.h"
-
-#define ATKINSON_HYPERLEGIBLE_8_FONT_ID (2001)
-#define ATKINSON_HYPERLEGIBLE_10_FONT_ID (2002)
-#define ATKINSON_HYPERLEGIBLE_12_FONT_ID (2003)
-#define ATKINSON_HYPERLEGIBLE_14_FONT_ID (2004)
-#define ATKINSON_HYPERLEGIBLE_16_FONT_ID (2005)
-#define ATKINSON_HYPERLEGIBLE_18_FONT_ID (2006)
 
 #define MONTSERRAT_8_FONT_ID (2501)
 #define MONTSERRAT_10_FONT_ID (2502)
@@ -85,12 +37,6 @@
 #define MONTSERRAT_14_FONT_ID (2504)
 #define MONTSERRAT_16_FONT_ID (2505)
 #define MONTSERRAT_18_FONT_ID (2506)
-
-#define CHAREINK_10_FONT_ID (3501)
-#define CHAREINK_12_FONT_ID (3502)
-#define CHAREINK_14_FONT_ID (3503)
-#define CHAREINK_16_FONT_ID (3504)
-#define CHAREINK_18_FONT_ID (3505)
 
 #define MONTSERRAT_CLOCK_70_FONT_ID (4001)
 

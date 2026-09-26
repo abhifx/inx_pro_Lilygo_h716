@@ -98,6 +98,9 @@ class LocalNetworkActivity final : public ActivityWithSubactivity {
   /** @brief Renders the server running state UI */
   void renderServerRunning() const;
 
+  /** @brief Draws a QR code for the local transfer URL */
+  void drawQRCode(int x, int y, const std::string& data) const;
+
   /**
    * @brief Callback for WiFi selection completion
    * @param connected True if WiFi connection successful
@@ -114,6 +117,8 @@ class LocalNetworkActivity final : public ActivityWithSubactivity {
   SemaphoreHandle_t renderingMutex; /**< Mutex for thread-safe rendering */
   bool updateRequired;              /**< Flag indicating render update needed */
   LocalNetworkState state;          /**< Current activity state */
+  bool wifiSelectionResultPending = false;
+  bool wifiSelectionConnected = false;
 
   std::string connectedIP;                /**< IP address of connected WiFi */
   std::string connectedSSID;              /**< SSID of connected WiFi network */

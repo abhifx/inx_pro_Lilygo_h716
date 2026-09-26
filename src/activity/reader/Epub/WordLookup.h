@@ -34,6 +34,7 @@ class WordLookup {
 
   bool captureFramebuffer(EpubActivity& activity);
   bool restoreFramebuffer(EpubActivity& activity) const;
+  void clearFramebufferCapture();
 
  private:
   void moveFocusWord(int delta);
@@ -53,9 +54,6 @@ class WordLookup {
   std::vector<size_t> lineFirst_;
   size_t focus_ = 0;
 
-  // Selection overlays keep a full copy of the 480x800 1bpp framebuffer.
-  // It is cold data read only when dismissing the overlay, so keep it out of
-  // the internal heap used by the display and image decoders.
   std::vector<CaptureBuffer> captureChunks_;
   CaptureBuffer captureMonolithic_;
   bool captureUsesMonolithic_ = false;

@@ -20,8 +20,9 @@ class LibraryIndex {
     std::string path;
     std::string title;
     std::string folder;
-    // Populated only for the optional Author view; library.idx itself stays unchanged.
     std::string author;
+    /** Optional transient UI badge supplied by a plugin-backed library view. */
+    std::string badge;
     uint16_t bookCount = 0;
     uint16_t folderCount = 0;
     bool hasMetadata = false;

@@ -12,12 +12,14 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <iterator>
 #include <limits>
 #include <vector>
 
 #include "hyphenation/Hyphenator.h"
+#include "../../GfxRenderer/RtlText.h"
 
 constexpr int MAX_COST = std::numeric_limits<int>::max();
 
@@ -28,56 +30,51 @@ constexpr size_t SOFT_HYPHEN_BYTES = 2;
 constexpr uint8_t kScriptScalePct = 70;
 
 template <typename T>
-std::vector<T> moveListPrefixToVector(std::list<T>& values, const size_t count) {
+std::vector<T> moveListPrefixToVector(std::deque<T>& values, const size_t count) {
   const size_t take = std::min(count, values.size());
   std::vector<T> out;
   out.reserve(take);
-  auto endIt = values.begin();
-  std::advance(endIt, static_cast<std::ptrdiff_t>(take));
-  for (auto it = values.begin(); it != endIt; ++it) {
-    out.push_back(std::move(*it));
+  for (size_t i = 0; i < take; ++i) {
+    out.push_back(std::move(values.front()));
+    values.pop_front();
   }
-  values.erase(values.begin(), endIt);
   return out;
 }
 
-std::vector<EpdFontFamily::Style> moveStylePrefixToVector(std::list<EpdFontFamily::Style>& values,
+std::vector<EpdFontFamily::Style> moveStylePrefixToVector(std::deque<EpdFontFamily::Style>& values,
                                                           const size_t count) {
   const size_t take = std::min(count, values.size());
-  auto endIt = values.begin();
-  std::advance(endIt, static_cast<std::ptrdiff_t>(take));
-  if (std::all_of(values.begin(), endIt,
+  if (std::all_of(values.begin(), values.begin() + static_cast<std::ptrdiff_t>(take),
                   [](EpdFontFamily::Style style) { return style == EpdFontFamily::REGULAR; })) {
-    values.erase(values.begin(), endIt);
+    for (size_t i = 0; i < take; ++i) values.pop_front();
     return {};
   }
   std::vector<EpdFontFamily::Style> out;
   out.reserve(take);
-  for (auto it = values.begin(); it != endIt; ++it) {
-    out.push_back(*it);
+  for (size_t i = 0; i < take; ++i) {
+    out.push_back(values.front());
+    values.pop_front();
   }
-  values.erase(values.begin(), endIt);
   return out;
 }
 
-uint8_t moveBytePrefixToCompactVector(std::list<uint8_t>& values, const size_t count, const uint8_t emptyDefault,
+uint8_t moveBytePrefixToCompactVector(std::deque<uint8_t>& values, const size_t count, const uint8_t emptyDefault,
                                       std::vector<uint8_t>& out) {
   const size_t take = std::min(count, values.size());
-  auto endIt = values.begin();
-  std::advance(endIt, static_cast<std::ptrdiff_t>(take));
-  if (values.begin() == endIt) {
+  if (take == 0) {
     return emptyDefault;
   }
   const uint8_t first = values.front();
-  if (std::all_of(values.begin(), endIt, [first](uint8_t value) { return value == first; })) {
-    values.erase(values.begin(), endIt);
+  if (std::all_of(values.begin(), values.begin() + static_cast<std::ptrdiff_t>(take),
+                  [first](uint8_t value) { return value == first; })) {
+    for (size_t i = 0; i < take; ++i) values.pop_front();
     return first;
   }
   out.reserve(take);
-  for (auto it = values.begin(); it != endIt; ++it) {
-    out.push_back(*it);
+  for (size_t i = 0; i < take; ++i) {
+    out.push_back(values.front());
+    values.pop_front();
   }
-  values.erase(values.begin(), endIt);
   return emptyDefault;
 }
 
@@ -197,11 +194,10 @@ uint16_t measureWordWidthForAlign(const GfxRenderer& renderer, const int fontId,
  */
 std::vector<size_t> computeGreedyLineBreaksWithDropIndent(const int pageWidth, const int spaceWidth,
                                                           const std::vector<uint16_t>& wordWidths,
-                                                          const std::list<uint8_t>& wordJoinPrevious,
+                                                          const std::vector<uint8_t>& joinPrevious,
                                                           const int dropIndentW, const int dropIndentLines) {
   std::vector<size_t> lineBreakIndices;
   const size_t n = wordWidths.size();
-  std::vector<uint8_t> joinPrevious(wordJoinPrevious.begin(), wordJoinPrevious.end());
   size_t currentIndex = 0;
   int lineNum = 0;
 
@@ -236,7 +232,7 @@ std::vector<size_t> computeGreedyLineBreaksWithDropIndent(const int pageWidth, c
   return lineBreakIndices;
 }
 
-}  // namespace
+}
 
 void ParsedText::addWord(std::string word, const EpdFontFamily::Style fontStyle, const bool smallCaps,
                          const bool underline, const bool joinPrevious, const uint8_t verticalAlign,
@@ -255,14 +251,11 @@ void ParsedText::addWord(std::string word, const EpdFontFamily::Style fontStyle,
   const uint8_t joined = joinPrevious && words.size() > 1 ? 1 : 0;
   wordJoinPrevious.push_back(joined);
   hasJoinedWords_ = hasJoinedWords_ || joined != 0;
-  // Only carry image-list entries once this block has an inline image (keeps plain text blocks lean).
   if (hasInlineImages_) {
     wordImagePaths.emplace_back();
     wordImageW.push_back(0);
     wordImageH.push_back(0);
   }
-  // Same lazy-backfill as inline images: first footnote-marker word backfills empty targets for every
-  // word already added, so the list only exists at all once a block actually has one.
   if (!footnoteTarget.empty() && !hasFootnoteLinks_) {
     wordFootnoteTargets.assign(words.size() - 1, std::string());
     hasFootnoteLinks_ = true;
@@ -274,7 +267,6 @@ void ParsedText::addWord(std::string word, const EpdFontFamily::Style fontStyle,
 
 void ParsedText::addImage(std::string cachePath, const uint16_t displayW, const uint16_t displayH) {
   if (cachePath.empty() || displayW == 0 || displayH == 0) return;
-  // First image in this block: backfill empty image slots for the words already added so the lists align.
   if (!hasInlineImages_) {
     const size_t n = words.size();
     wordImagePaths.assign(n, std::string());
@@ -282,7 +274,6 @@ void ParsedText::addImage(std::string cachePath, const uint16_t displayW, const 
     wordImageH.assign(n, 0);
     hasInlineImages_ = true;
   }
-  // Placeholder text word (empty) keeps every parallel list aligned; the image fields carry the real data.
   words.emplace_back();
   wordStyles.push_back(EpdFontFamily::REGULAR);
   bionicPrefixBytes.push_back(0);
@@ -291,7 +282,6 @@ void ParsedText::addImage(std::string cachePath, const uint16_t displayW, const 
   wordVerticalAlign.push_back(TextBlock::BASELINE);
   wordXOffset.push_back(0);
   wordJoinPrevious.push_back(0);
-  // An image slot is never itself a footnote marker, but the list must stay aligned with `words` once started.
   if (hasFootnoteLinks_) {
     wordFootnoteTargets.emplace_back();
   }
@@ -307,28 +297,46 @@ void ParsedText::layoutAndExtractLines(const GfxRenderer& renderer, const int fo
     return;
   }
 
+  rtlParagraph_ = false;
+  for (const auto& word : words) {
+    const RtlText::Direction direction = RtlText::firstStrongDirection(word.c_str());
+    if (direction == RtlText::Direction::RTL) {
+      rtlParagraph_ = true;
+      break;
+    }
+    if (direction == RtlText::Direction::LTR) {
+      break;
+    }
+  }
+  // EPUBs commonly omit text-align for RTL paragraphs. In that case the
+  // logical "left/start" edge is the right edge of the page.
+  if (rtlParagraph_ && style == TextBlock::LEFT_ALIGN) {
+    style = TextBlock::RIGHT_ALIGN;
+  }
+
   applyParagraphIndent(renderer, fontId);
 
   const int pageWidth = viewportWidth;
-  // The word-spacing setting scales the natural inter-word space; it is baked into the line layout (xpos).
   const int spaceWidth =
       std::max(1, static_cast<int>(std::lround(renderer.text.getSpaceWidth(fontId) * wordSpacingFactor_)));
   auto wordWidths = calculateWordWidths(renderer, fontId);
+  const std::vector<uint8_t> joinPreviousSnapshot =
+      hasJoinedWords_ ? std::vector<uint8_t>(wordJoinPrevious.begin(), wordJoinPrevious.end()) : std::vector<uint8_t>();
   std::vector<size_t> lineBreakIndices;
   const int dropW = static_cast<int>(leftIndentWidth);
   const int dropL = static_cast<int>(leftIndentLineCount);
   if (hyphenationEnabled) {
-    lineBreakIndices = computeHyphenatedLineBreaks(renderer, fontId, pageWidth, spaceWidth, wordWidths, dropW, dropL);
+    lineBreakIndices =
+        computeHyphenatedLineBreaks(renderer, fontId, pageWidth, spaceWidth, wordWidths, joinPreviousSnapshot, dropW,
+                                    dropL);
   } else {
-    lineBreakIndices = computeLineBreaks(renderer, fontId, pageWidth, spaceWidth, wordWidths, dropW, dropL);
+    lineBreakIndices =
+        computeLineBreaks(renderer, fontId, pageWidth, spaceWidth, wordWidths, joinPreviousSnapshot, dropW, dropL);
   }
   if (lineBreakIndices.empty() || (!includeLastLine && lineBreakIndices.size() <= 1)) {
     return;
   }
   const size_t lineCount = includeLastLine ? lineBreakIndices.size() : lineBreakIndices.size() - 1;
-  const std::vector<uint8_t> joinPreviousSnapshot =
-      hasJoinedWords_ ? std::vector<uint8_t>(wordJoinPrevious.begin(), wordJoinPrevious.end()) : std::vector<uint8_t>();
-
   for (size_t i = 0; i < lineCount; ++i) {
     extractLine(i, pageWidth, spaceWidth, wordWidths, lineBreakIndices, joinPreviousSnapshot, processLine);
   }
@@ -352,7 +360,6 @@ std::vector<uint16_t> ParsedText::calculateWordWidths(const GfxRenderer& rendere
     const bool smallCaps = smallCapsIt != wordSmallCaps.end() && (*smallCapsIt != 0);
     const uint8_t verticalAlign = verticalAlignIt != wordVerticalAlign.end() ? *verticalAlignIt : TextBlock::BASELINE;
     if (imgPathIt != wordImagePaths.end() && !imgPathIt->empty()) {
-      // Inline image: its on-line footprint is the image display width (no text measuring).
       wordWidths.push_back(imgWIt != wordImageW.end() ? *imgWIt : 0);
     } else {
       wordWidths.push_back(
@@ -377,7 +384,8 @@ std::vector<uint16_t> ParsedText::calculateWordWidths(const GfxRenderer& rendere
 
 std::vector<size_t> ParsedText::computeLineBreaks(const GfxRenderer& renderer, const int fontId, const int pageWidth,
                                                   const int spaceWidth, std::vector<uint16_t>& wordWidths,
-                                                  int dropIndentW, int dropIndentLines) {
+                                                  const std::vector<uint8_t>& joinPrevious, const int dropIndentW,
+                                                  const int dropIndentLines) {
   if (words.empty()) {
     return {};
   }
@@ -398,7 +406,7 @@ std::vector<size_t> ParsedText::computeLineBreaks(const GfxRenderer& renderer, c
     const size_t totalWordCount = words.size();
     constexpr size_t kMaxOptimalLineBreakWords = 220;
     if (totalWordCount > kMaxOptimalLineBreakWords) {
-      return computeGreedyLineBreaksWithDropIndent(pageWidth, spaceWidth, wordWidths, wordJoinPrevious, dropIndentW,
+      return computeGreedyLineBreaksWithDropIndent(pageWidth, spaceWidth, wordWidths, joinPrevious, dropIndentW,
                                                    dropIndentLines);
     }
 
@@ -413,14 +421,12 @@ std::vector<size_t> ParsedText::computeLineBreaks(const GfxRenderer& renderer, c
       dp[static_cast<size_t>(i)] = MAX_COST;
 
       for (size_t j = static_cast<size_t>(i); j < totalWordCount; ++j) {
-        const bool joinedToPrevious = j > static_cast<size_t>(i) && *std::next(wordJoinPrevious.begin(), j) != 0;
+        const bool joinedToPrevious = j > static_cast<size_t>(i) && j < joinPrevious.size() && joinPrevious[j] != 0;
         const int gap = (j == static_cast<size_t>(i) || joinedToPrevious) ? 0 : spaceWidth;
         currlen += wordWidths[j] + gap;
         if (gap > 0) {
           ++naturalGapCount;
         }
-        // Only justified rendering compresses spaces; for left/center/right the line is drawn at natural
-        // spacing, so over-packing it would overflow (and centering would shove the first words off-screen).
         const int compressBudget = (style == TextBlock::JUSTIFIED) ? (naturalGapCount * spaceWidth * 2) / 5 : 0;
         if (currlen > pageWidth + compressBudget) {
           break;
@@ -430,8 +436,6 @@ std::vector<size_t> ParsedText::computeLineBreaks(const GfxRenderer& renderer, c
           cost = 0;
         } else {
           const int remainingSpace = pageWidth - currlen;
-          // Penalize stretched lines (positive remaining = unnatural gaps) more than compressed ones so the
-          // layout favors packing words tightly, while the budget above keeps spaces readable.
           const int penalty = remainingSpace >= 0 ? remainingSpace : (-remainingSpace) / 3;
           const long long cost_ll = static_cast<long long>(penalty) * penalty + dp[j + 1];
           cost = (cost_ll > MAX_COST) ? MAX_COST : static_cast<int>(cost_ll);
@@ -471,7 +475,7 @@ std::vector<size_t> ParsedText::computeLineBreaks(const GfxRenderer& renderer, c
    * plenty stable and avoids the quadratic allocation entirely.
    */
   if (dropIndentLines <= 1) {
-    return computeGreedyLineBreaksWithDropIndent(pageWidth, spaceWidth, wordWidths, wordJoinPrevious, dropIndentW,
+    return computeGreedyLineBreaksWithDropIndent(pageWidth, spaceWidth, wordWidths, joinPrevious, dropIndentW,
                                                  dropIndentLines);
   }
 
@@ -479,7 +483,7 @@ std::vector<size_t> ParsedText::computeLineBreaks(const GfxRenderer& renderer, c
   constexpr size_t kMaxDropIndentDpCells = 4800;
   const size_t gridCells = static_cast<size_t>(n + 1) * static_cast<size_t>(n + 2);
   if (gridCells > kMaxDropIndentDpCells) {
-    return computeGreedyLineBreaksWithDropIndent(pageWidth, spaceWidth, wordWidths, wordJoinPrevious, dropIndentW,
+    return computeGreedyLineBreaksWithDropIndent(pageWidth, spaceWidth, wordWidths, joinPrevious, dropIndentW,
                                                  dropIndentLines);
   }
 
@@ -502,8 +506,7 @@ std::vector<size_t> ParsedText::computeLineBreaks(const GfxRenderer& renderer, c
       dp[static_cast<size_t>(i)][static_cast<size_t>(ell)] = MAX_COST;
 
       for (int j = i; j < n; ++j) {
-        const bool joinedToPrevious =
-            j > i && *std::next(wordJoinPrevious.begin(), static_cast<std::ptrdiff_t>(j)) != 0;
+        const bool joinedToPrevious = j > i && j < joinPrevious.size() && joinPrevious[static_cast<size_t>(j)] != 0;
         currlen += wordWidths[static_cast<size_t>(j)] + ((j == i || joinedToPrevious) ? 0 : spaceWidth);
         if (currlen > W) {
           break;
@@ -574,7 +577,6 @@ void ParsedText::applyParagraphIndent(const GfxRenderer& renderer, const int fon
     return;
   }
 
-  // Don't indent a leading inline image word (its text slot must stay empty).
   const bool frontIsImage = !wordImagePaths.empty() && !wordImagePaths.front().empty();
   if ((style == TextBlock::JUSTIFIED || style == TextBlock::LEFT_ALIGN) && !frontIsImage) {
     const int emWidth = renderer.text.getWidth(fontId, "\xe2\x80\x83", EpdFontFamily::REGULAR);
@@ -586,8 +588,9 @@ void ParsedText::applyParagraphIndent(const GfxRenderer& renderer, const int fon
 
 std::vector<size_t> ParsedText::computeHyphenatedLineBreaks(const GfxRenderer& renderer, const int fontId,
                                                             const int pageWidth, const int spaceWidth,
-                                                            std::vector<uint16_t>& wordWidths, int dropIndentW,
-                                                            int dropIndentLines) {
+                                                            std::vector<uint16_t>& wordWidths,
+                                                            const std::vector<uint8_t>& joinPrevious,
+                                                            const int dropIndentW, const int dropIndentLines) {
   std::vector<size_t> lineBreakIndices;
   size_t currentIndex = 0;
   int lineNum = 0;
@@ -599,16 +602,13 @@ std::vector<size_t> ParsedText::computeHyphenatedLineBreaks(const GfxRenderer& r
 
     while (currentIndex < wordWidths.size()) {
       const bool isFirstWord = currentIndex == lineStart;
-      const bool joinedToPrevious =
-          currentIndex < wordJoinPrevious.size() && *std::next(wordJoinPrevious.begin(), currentIndex) != 0;
+      const bool joinedToPrevious = currentIndex < joinPrevious.size() && joinPrevious[currentIndex] != 0;
       const int spacing = (isFirstWord || joinedToPrevious) ? 0 : spaceWidth;
       const int candidateWidth = spacing + wordWidths[currentIndex];
 
-      // Only justified rendering compresses spaces (see computeLineBreaks); other alignments draw at natural
-      // spacing, so over-packing would overflow / push centered words off-screen.
       int naturalGapCount = 0;
       for (size_t gi = lineStart + 1; gi <= currentIndex; ++gi) {
-        if (*std::next(wordJoinPrevious.begin(), gi) == 0) {
+        if (gi >= joinPrevious.size() || joinPrevious[gi] == 0) {
           ++naturalGapCount;
         }
       }
@@ -673,7 +673,6 @@ bool ParsedText::hyphenateWordAtIndex(const size_t wordIndex, const int availabl
     std::advance(imgPathIt, wordIndex);
     std::advance(imgWIt, wordIndex);
     std::advance(imgHIt, wordIndex);
-    // Inline images are atomic — never hyphenate / split them.
     if (!imgPathIt->empty()) {
       return false;
     }
@@ -751,17 +750,11 @@ bool ParsedText::hyphenateWordAtIndex(const size_t wordIndex, const int availabl
   wordVerticalAlign.insert(insertVerticalAlignIt, verticalAlign);
   wordXOffset.insert(insertXOffsetIt, 0);
   wordJoinPrevious.insert(insertJoinPreviousIt, 0);
-  // The split halves are plain text — keep the parallel image lists aligned (only when this block has any).
   if (blockHasImages) {
     wordImagePaths.insert(std::next(imgPathIt), std::string());
     wordImageW.insert(std::next(imgWIt), 0);
     wordImageH.insert(std::next(imgHIt), 0);
   }
-  // Both halves of a hyphenated word are still "inside" whatever link the whole word was in - copy the
-  // target rather than leaving the remainder unmarked. Keeping this list's length in sync with `words` is
-  // required, not cosmetic: TextBlock::serialize()/deserialize() read back exactly wordCount entries once
-  // any footnote data is present, so any length drift here corrupts the byte stream for every field that
-  // follows it on disk.
   if (blockHasFootnoteLinks) {
     wordFootnoteTargets.insert(std::next(footnoteIt), *footnoteIt);
   }
@@ -797,7 +790,6 @@ void ParsedText::extractLine(const size_t breakIndex, const int pageWidth, const
     }
   }
 
-  // Track the widest natural (pre-alignment) line so CSS border rules can be sized to the text, not the page.
   const int naturalLineWidth = lineWordWidthSum + naturalGapCount * spaceWidth;
   if (naturalLineWidth > static_cast<int>(maxLineContentWidth_)) {
     maxLineContentWidth_ = static_cast<uint16_t>(std::min(naturalLineWidth, 65535));
@@ -827,7 +819,9 @@ void ParsedText::extractLine(const size_t breakIndex, const int pageWidth, const
   }
 
   uint16_t xpos = currentIndent;
-  if (style == TextBlock::RIGHT_ALIGN && spareSpace >= 0) {
+  if ((style == TextBlock::RIGHT_ALIGN ||
+       (rtlParagraph_ && style == TextBlock::JUSTIFIED && isLastLine)) &&
+      spareSpace >= 0) {
     xpos += spareSpace - gapCount * spaceWidth;
   } else if (style == TextBlock::CENTER_ALIGN && spareSpace >= 0) {
     xpos += (spareSpace - gapCount * spaceWidth) / 2;
@@ -890,14 +884,11 @@ void ParsedText::extractLine(const size_t breakIndex, const int pageWidth, const
   const uint8_t underlineDefault = moveBytePrefixToCompactVector(wordUnderline, lineWordCount, 0, lineWordUnderline);
   const uint8_t verticalAlignDefault =
       moveBytePrefixToCompactVector(wordVerticalAlign, lineWordCount, TextBlock::BASELINE, lineWordVerticalAlign);
-  auto joinPreviousEndIt = wordJoinPrevious.begin();
-  std::advance(joinPreviousEndIt, static_cast<std::ptrdiff_t>(std::min(lineWordCount, wordJoinPrevious.size())));
-  wordJoinPrevious.erase(wordJoinPrevious.begin(), joinPreviousEndIt);
-  auto xOffsetEndIt = wordXOffset.begin();
-  std::advance(xOffsetEndIt, static_cast<std::ptrdiff_t>(std::min(lineWordCount, wordXOffset.size())));
-  wordXOffset.erase(wordXOffset.begin(), xOffsetEndIt);
+  const size_t joinCount = std::min(lineWordCount, wordJoinPrevious.size());
+  for (size_t i = 0; i < joinCount; ++i) wordJoinPrevious.pop_front();
+  const size_t xOffsetCount = std::min(lineWordCount, wordXOffset.size());
+  for (size_t i = 0; i < xOffsetCount; ++i) wordXOffset.pop_front();
 
-  // Image lists are only present when this block has inline images; splice them in parallel when so.
   std::vector<std::string> lineWordImagePaths;
   std::vector<uint16_t> lineWordImageW;
   std::vector<uint16_t> lineWordImageH;
@@ -907,7 +898,6 @@ void ParsedText::extractLine(const size_t breakIndex, const int pageWidth, const
     lineWordImageH = moveListPrefixToVector(wordImageH, lineWordCount);
   }
 
-  // Footnote target list is only present once this block has a footnote-marker word; splice in parallel.
   std::vector<std::string> lineWordFootnoteTargets;
   if (!wordFootnoteTargets.empty()) {
     lineWordFootnoteTargets = moveListPrefixToVector(wordFootnoteTargets, lineWordCount);

@@ -11,6 +11,7 @@
 #include <WiFi.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <esp_heap_caps.h>
 
 #include <algorithm>
 #include <string>
@@ -22,10 +23,10 @@
 #include "system/Fonts.h"
 #include "system/MappedInputManager.h"
 
-// cppcheck-suppress missingInclude
 #include "esp_task_wdt.h"
 
 namespace {
+constexpr uint32_t kDisplayTaskStack = 8192;
 constexpr int kSourceItemHeight = Page::LIST_ITEM_HEIGHT;
 constexpr int kFirmwareItemHeight = Page::LIST_ITEM_HEIGHT;
 const std::string kEmptyPath;
@@ -136,7 +137,7 @@ ButtonBounds updateButtonBounds(const GfxRenderer& renderer, const int y) {
   const int width = Button::width(renderer, "Update", font);
   return {(renderer.getScreenWidth() - width) / 2, y, width, Button::height};
 }
-}  // namespace
+}
 
 void OtaUpdateActivity::taskTrampoline(void* param) {
   auto* self = static_cast<OtaUpdateActivity*>(param);
@@ -161,6 +162,14 @@ void OtaUpdateActivity::onWifiSelectionComplete(const bool success) {
   vTaskDelay(pdMS_TO_TICKS(450));
 
   const auto res = updater.checkForUpdate();
+  if (res == OtaUpdater::NO_UPDATE) {
+    INX_SERIAL.printf("[%lu] [OTA] No stable update available\n", millis());
+    xSemaphoreTake(renderingMutex, portMAX_DELAY);
+    state = NO_UPDATE;
+    xSemaphoreGive(renderingMutex);
+    updateRequired = true;
+    return;
+  }
   if (res != OtaUpdater::OK) {
     INX_SERIAL.printf("[%lu] [OTA] Update check failed: %d\n", millis(), res);
     xSemaphoreTake(renderingMutex, portMAX_DELAY);
@@ -195,7 +204,8 @@ void OtaUpdateActivity::onEnter() {
   sdFirmwareSelectionVisible = false;
   updateRequired = true;
 
-  xTaskCreate(&OtaUpdateActivity::taskTrampoline, "OtaUpdateActivityTask", 4096, this, 1, &displayTaskHandle);
+  xTaskCreateWithCaps(&OtaUpdateActivity::taskTrampoline, "OtaUpdateActivityTask", kDisplayTaskStack, this, 1,
+                      &displayTaskHandle, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 
   INX_SERIAL.printf("[%lu] [OTA] Waiting for update source selection\n", millis());
 }
@@ -253,7 +263,7 @@ void OtaUpdateActivity::onExit() {
 
   xSemaphoreTake(renderingMutex, portMAX_DELAY);
   if (displayTaskHandle) {
-    vTaskDelete(displayTaskHandle);
+    vTaskDeleteWithCaps(displayTaskHandle);
     displayTaskHandle = nullptr;
   }
   vSemaphoreDelete(renderingMutex);
@@ -330,10 +340,15 @@ void OtaUpdateActivity::render() {
   } else if (state == WAITING_SD_SELECTION) {
     const int totalFiles = static_cast<int>(sdFirmwareFiles.size());
     if (totalFiles == 0) {
-      renderer.text.render(systemFontId(), 20, bodyTop, "No firmware .bin files found.", true,
-                           EpdFontFamily::BOLD);
-      renderer.text.render(systemFontId(), 20, bodyTop + 32, "Put .bin files in / or /firmware.",
-                           true, EpdFontFamily::REGULAR);
+      constexpr int lineGap = 8;
+      const int lineHeight = renderer.text.getLineHeight(systemFontId());
+      const int messageHeight = lineHeight * 2 + lineGap;
+      const int bodyBottom = screenHeight - 80;
+      const int messageTop = bodyTop + std::max(0, (bodyBottom - bodyTop - messageHeight) / 2);
+      renderer.text.centered(systemFontId(), messageTop, "No firmware .bin files found.", true,
+                             EpdFontFamily::BOLD);
+      renderer.text.centered(systemFontId(), messageTop + lineHeight + lineGap,
+                             "Put .bin files in / or /firmware.", true, EpdFontFamily::REGULAR);
       const auto labels = mappedInput.mapLabels("« Back", "", "", "");
     } else {
       const int listBottom = screenHeight - 44;
@@ -500,11 +515,12 @@ void OtaUpdateActivity::loop() {
       if (state == SOURCE_SELECTION && tapY >= bodyTop && tapY < bodyTop + 2 * kSourceItemHeight) {
         sourceSelectedIndex = (tapY - bodyTop) / kSourceItemHeight;
         if (sourceSelectedIndex == 0) {
+          xSemaphoreTake(renderingMutex, portMAX_DELAY);
           state = WIFI_SELECTION;
-          updateRequired = true;
-          WiFi.mode(WIFI_STA);
+          updateRequired = false;
           enterNewActivity(new WifiSelectionActivity(
               renderer, mappedInput, [this](const bool connected) { onWifiSelectionComplete(connected); }));
+          xSemaphoreGive(renderingMutex);
         } else {
           scanSdFirmwareFiles();
           state = WAITING_SD_SELECTION;
@@ -571,13 +587,11 @@ void OtaUpdateActivity::loop() {
       if (sourceSelectedIndex == 0) {
         xSemaphoreTake(renderingMutex, portMAX_DELAY);
         state = WIFI_SELECTION;
-        xSemaphoreGive(renderingMutex);
-        updateRequired = true;
-        INX_SERIAL.printf("[%lu] [OTA] Turning on WiFi...\n", millis());
-        WiFi.mode(WIFI_STA);
+        updateRequired = false;
         INX_SERIAL.printf("[%lu] [OTA] Launching WifiSelectionActivity...\n", millis());
         enterNewActivity(new WifiSelectionActivity(
             renderer, mappedInput, [this](const bool connected) { onWifiSelectionComplete(connected); }));
+        xSemaphoreGive(renderingMutex);
       } else {
         scanSdFirmwareFiles();
         xSemaphoreTake(renderingMutex, portMAX_DELAY);

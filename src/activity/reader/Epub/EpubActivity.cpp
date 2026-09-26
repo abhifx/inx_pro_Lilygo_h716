@@ -6,6 +6,7 @@
 #include "EpubActivity.h"
 
 #include <Bitmap.h>
+#include <ArduinoJson.h>
 #include <Epub/Page.h>
 #include <Epub/PageWordIndex.h>
 #include <GfxRenderer.h>
@@ -34,6 +35,7 @@
 #endif
 #include "KOReaderSyncActivity.h"
 #include "SettingsDrawer.h"
+#include "activity/page/components/global/Button.h"
 #include "activity/page/components/global/PopUp.h"
 #include "activity/util/KeyboardEntryActivity.h"
 #include "state/BookProgress.h"
@@ -45,20 +47,28 @@
 #include "state/Statistics.h"
 #include "state/SystemSetting.h"
 #include "system/FontManager.h"
+#include "system/LanguageManager.h"
 #include "system/Fonts.h"
 #include "system/Frontlight.h"
 #include "system/FrontlightPreferences.h"
 #include "system/MappedInputManager.h"
 #include "system/ScreenComponents.h"
+#include "system/PluginManager.h"
+
+extern "C" {
+#include "lua.h"
+}
+
+extern void openReaderFromCallback(const std::string& path, std::function<void()> returnToCaller);
 
 namespace {
 constexpr unsigned long goHomeMs = 1000;
 constexpr unsigned long bookmarkHoldMs = 1000;
-constexpr unsigned long wordSelectionHoldMs = 500;
+constexpr unsigned long wordSelectionHoldMs = 300;
 constexpr bool kReaderHighQualityFastLut = true;
-
-// Base word-action list; EpubActivity::currentWordActions() appends "View footnote" conditionally.
-const std::vector<std::string> kBaseWordActions = {"Look up", "Highlight", "Add note"};
+constexpr int kWordSelectionHandleRadius = 11;
+constexpr int kWordSelectionActionGap = 14;
+constexpr bool kWordSelectionActionBarVertical = true;
 
 bool pageImageFootprintAtLeastHalfScreen(const Page& page, const GfxRenderer& renderer, int marginLeft, int marginTop) {
   if (!page.hasImages()) {
@@ -87,7 +97,7 @@ uint32_t floatBits(const float value) {
   memcpy(&bits, &value, sizeof(bits));
   return bits;
 }
-}  // namespace
+}
 
 /**
  * @brief Constructs a new EpubActivity
@@ -98,7 +108,8 @@ uint32_t floatBits(const float value) {
  * @param onGoToHome Callback for navigating to Home
  */
 EpubActivity::EpubActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::unique_ptr<Epub> epub,
-                           const std::function<void()>& onGoBack, const std::function<void()>& onGoToHome)
+                           const std::function<void()>& onGoBack, const std::function<void()>& onGoToHome,
+                           const int initialSpineIndex, const int initialPageNumber)
     : ActivityWithSubactivity("EpubReader", renderer, mappedInput),
       currentFontId(0),
       nextFontId(0),
@@ -107,6 +118,8 @@ EpubActivity::EpubActivity(GfxRenderer& renderer, MappedInputManager& mappedInpu
       onGoToHome(onGoToHome),
       currentSpineIndex(0),
       nextPageNumber(0),
+      initialSpineIndex_(initialSpineIndex),
+      initialPageNumber_(initialPageNumber),
       pagesUntilFullRefresh(0),
       cachedSpineIndex(0),
       cachedChapterTotalPageCount(0),
@@ -139,9 +152,6 @@ ViewportInfo EpubActivity::calculateViewport() {
   info.totalMarginRight = oR + bookSettings.screenMargin;
 
   info.fontId = bookSettings.getReaderFontId();
-  // Each line's baseline is (top + ascender), so the first line's cap top sits (ascender - capHeight)
-  // below the margin. Remove that font leading so text starts at the screen margin (it otherwise looks
-  // like a doubled top margin). Usable height grows by the same amount, so the bottom is unchanged.
   const int topInset = renderer.text.getGlyphTopInset(info.fontId, 'H', EpdFontFamily::REGULAR);
   info.totalMarginTop = std::max(oT, info.totalMarginTop - topInset);
 
@@ -161,8 +171,6 @@ ViewportInfo EpubActivity::calculateViewport() {
 
 void EpubActivity::drawLoadingScreen() {
   invalidatePreparedPage();
-  // displayBuffer() swaps Sticky's dual framebuffers. Copy the displayed frame back before
-  // painting only the loading bar, otherwise the bar is drawn over stale library/white data.
   renderer.syncWriteBufferFromActive();
   const int barWidth = renderer.getScreenWidth();
   const int barHeight = 8;
@@ -185,18 +193,16 @@ void EpubActivity::drawLoadingScreen() {
 
 void EpubActivity::drawPreparingBookScreen() {
   invalidatePreparedPage();
-  // Keep the preparation state as a normal full-screen frame.  In particular, do not use the
-  // popup renderer here: it paints a temporary overlay and the following buffer swap can expose
-  // the old library frame while the book is still being opened.
   renderer.clearScreen(0xff);
   renderer.text.centered(MONTSERRAT_12_FONT_ID, renderer.getScreenHeight() / 2,
                          "Preparing book...", true);
   renderer.displayBuffer();
 }
 
-void EpubActivity::readerPopup(const char* message) {
+void EpubActivity::readerPopup(const char* message, const uint32_t autoDismissMs) {
   invalidatePreparedPage();
   pauseReadingStats();
+  readerPopupExpiresAt_ = autoDismissMs == 0 ? 0 : millis() + autoDismissMs;
   renderer.syncWriteBufferFromActive();
   ScreenComponents::drawPopup(renderer, message);
 }
@@ -239,8 +245,6 @@ ScreenComponents::LoadingProgressLayout EpubActivity::loadingProgressShow(const 
  * @return true if successful, false otherwise
  */
 bool EpubActivity::buildSection(int spineIndex, const ViewportInfo& info, bool showProgress, bool skipImages) {
-  // Foreground generation must own the EPUB ZIP handles. An in-progress idle
-  // build is disposable; its final file is never published until complete.
   if (!epub) return false;
   const int totalSpines = epub->getSpineItemsCount();
   if (spineIndex < 0 || spineIndex >= totalSpines) {
@@ -248,7 +252,6 @@ bool EpubActivity::buildSection(int spineIndex, const ViewportInfo& info, bool s
     return false;
   }
   const std::string cachePath = epub->getCachePath();
-  // Section files live under sections/*.bin (see Section ctor). Legacy .sec at cache root was never used here.
   const std::string sectionBinPath = cachePath + "/sections/" + std::to_string(spineIndex) + ".bin";
   const std::string legacySecPath = cachePath + "/" + std::to_string(spineIndex) + ".sec";
   if (SdMan.exists(legacySecPath.c_str())) {
@@ -274,8 +277,6 @@ bool EpubActivity::buildSection(int spineIndex, const ViewportInfo& info, bool s
       info.wordSpacing, bookSettings.extraParagraphSpacing, bookSettings.paragraphAlignment, info.width, info.height,
       bookSettings.hyphenationEnabled, bookSettings.paragraphCssIndentEnabled != 0,
       bookSettings.bionicReadingEnabled != 0, nullptr, skipImages, nullptr,
-      // Image display caches are generated lazily by the visible-page render. Warming every image while
-      // parsing made chapter opening pay for all decoder work and SD writes before the first page existed.
       /*warmImageDisplayCache=*/false,
       /*warmImageRenderMode=*/READER_SETTINGS.readerImageGrayscale != 0 ? ImageRenderMode::TwoBit
                                                                            : ImageRenderMode::OneBit,
@@ -283,16 +284,9 @@ bool EpubActivity::buildSection(int spineIndex, const ViewportInfo& info, bool s
       info.totalMarginTop);
 
   if (success) {
-    // This spine's pagination just changed (first build, or a font/size/margin change forced a rebuild) -
-    // re-locate any existing highlights for it by their stored phrase before anything renders, so a
-    // highlight created under one layout stays on the right words after switching to another. Cheap no-op
-    // for the common case of a spine with no annotations.
     EpubAnnotations::migrateSpineAnnotations(cachePath, spineIndex, tempSection->pageCount, renderer, info.fontId,
                                              FontManager::getNextFont(info.fontId), info.totalMarginLeft,
                                              info.totalMarginTop);
-    // Migration rewrites this spine's annotation shards. The in-memory page cache can still describe
-    // the old pagination (including the same numeric page before and after a font change), so force the
-    // next render to load the relocated highlight from disk and rebuild its word geometry.
     annUi_.annotations().clearSession();
     annUi_.storedRanges().clear();
     annUi_.clearWordIndexCache();
@@ -485,9 +479,6 @@ bool EpubActivity::displayCoverOrTitle() {
     renderer.clearScreen();
     ImageRender::Options options;
     options.cropToFill = true;
-    // The slow path immediately moves on to thumbnail generation. Keep this
-    // rendered cover plane in the PSRAM display cache, but defer its durable
-    // SD write until the reader returns to the idle main loop.
     options.asyncDisplayCache = true;
     if (ImageRender::create(renderer, coverJpegPath).render(0, 0, pageWidth, pageHeight, options)) {
       renderer.displayBuffer();
@@ -590,6 +581,12 @@ void EpubActivity::fastPath() {
     cachedSpineIndex = 0;
     cachedChapterTotalPageCount = 0;
   }
+  if (initialSpineIndex_ >= 0 && initialSpineIndex_ < totalSpineItems && initialPageNumber_ >= 0) {
+    currentSpineIndex = initialSpineIndex_;
+    nextPageNumber = initialPageNumber_;
+    cachedSpineIndex = currentSpineIndex;
+    cachedChapterTotalPageCount = 0;
+  }
 
   loadCurrentSection();
   statusBar = std::unique_ptr<StatusBar>(new StatusBar(renderer, *epub, bookSettings, &readingStats_));
@@ -616,8 +613,15 @@ bool EpubActivity::slowPath() {
                  coverAvailable ? 1 : 0);
   ensureThumbnailExists(coverAvailable);
   const int initialSpine = epub->getSpineIndexForInitialOpen();
-  currentSpineIndex = (initialSpine == 0 && epub->getSpineItemsCount() > 1) ? 1 : initialSpine;
+  // Honor the EPUB's initial spine item. Some books place the cover image in
+  // that item and put a separate, text-only title stub immediately after it.
+  // Skipping spine 0 made those books open on the stub instead of the cover.
+  currentSpineIndex = initialSpine;
   nextPageNumber = 0;
+  if (initialSpineIndex_ >= 0 && initialSpineIndex_ < epub->getSpineItemsCount() && initialPageNumber_ >= 0) {
+    currentSpineIndex = initialSpineIndex_;
+    nextPageNumber = initialPageNumber_;
+  }
 
   FontManager::ensureReaderLayoutFonts(calculateViewport().fontId, renderer);
   BOOK_STATE.addOrUpdateBook(epub->getPath(), epub->getTitle(), epub->getAuthor());
@@ -640,6 +644,13 @@ bool EpubActivity::slowPath() {
  */
 void EpubActivity::onEnter() {
   ActivityWithSubactivity::onEnter();
+  bookFinished_ = false;
+  readerSuggestionAvailable_ = false;
+  readerSuggestionPath_.clear();
+  readerSuggestionTitle_.clear();
+  readerSuggestionGroup_.clear();
+  readerSuggestionLabel_.clear();
+  btnBindings_.reset();
   epub->setupCacheDir();
 
   syncSettingsFromGlobalIfNeeded();
@@ -697,15 +708,39 @@ int EpubActivity::wordAt(const int x, const int y) const {
 }
 
 void EpubActivity::closeWordSelection() {
+  const bool hadWordSelection = wordSelectionOpen_;
   wordSelectionOpen_ = false;
   wordActionsOpen_ = false;
   selectedWord_ = -1;
+  wordSelectionAnchor_ = -1;
+  wordSelectionFocus_ = -1;
+  wordSelectionHandleDragActive_ = false;
+  wordSelectionDraggingStart_ = false;
+  wordSelectionDraggingOnWord_ = false;
+  if (hadWordSelection) {
+    annUi_.clearExternalFramebuffer();
+  }
   std::vector<PageWordHit>().swap(touchWords_);
 }
 
+bool EpubActivity::wordSelectionIsMultiple() const {
+  return wordSelectionAnchor_ >= 0 && wordSelectionFocus_ >= 0 && wordSelectionAnchor_ != wordSelectionFocus_;
+}
+
 std::vector<std::string> EpubActivity::currentWordActions() const {
-  std::vector<std::string> actions = kBaseWordActions;
-  if (selectedWord_ >= 0 && selectedWord_ < static_cast<int>(touchWords_.size()) &&
+  std::vector<std::string> actions;
+  if (!wordSelectionIsMultiple()) {
+    actions.push_back("Look up");
+  }
+  actions.push_back("Highlight");
+  actions.push_back(wordSelectionIsMultiple() ? "Add note" : "Add page note");
+  std::string pluginId;
+  std::string pluginLabel;
+  std::string pluginFunction;
+  if (PluginManager::findReaderSelectionPlugin(pluginId, pluginLabel, pluginFunction)) {
+    actions.push_back(pluginLabel);
+  }
+  if (!wordSelectionIsMultiple() && selectedWord_ >= 0 && selectedWord_ < static_cast<int>(touchWords_.size()) &&
       !touchWords_[static_cast<size_t>(selectedWord_)].footnoteTarget.empty()) {
     actions.push_back("View footnote");
   }
@@ -717,26 +752,200 @@ void EpubActivity::renderWordSelection() {
     return;
   }
 
-  // renderScreen() has already placed the reader page in the active buffer.
-  // Patch that exact page so the selection overlay never brings back an older
-  // reader frame from the second framebuffer.
-  renderer.syncWriteBufferFromActive();
+  if (!annUi_.restoreExternalFramebuffer(*this)) {
+    renderer.syncWriteBufferFromActive();
+  }
   renderer.setRenderMode(GfxRenderer::BW);
 
-  const PageWordHit& word = touchWords_[static_cast<size_t>(selectedWord_)];
-  renderer.ui.fillSparseInkLatticeInRect(word.screenX, std::max(0, word.screenY), std::max(1, word.screenW),
-                                         std::max(3, word.screenH), 2);
+  const size_t actionWordIndex = static_cast<size_t>(std::max(wordSelectionAnchor_, wordSelectionFocus_));
+  const PageWordHit& word = touchWords_[actionWordIndex < touchWords_.size() ? actionWordIndex
+                                                                              : static_cast<size_t>(selectedWord_)];
+  drawWordSelectionRange();
+  drawWordSelectionHandles();
 
-  if (wordActionsOpen_) {
-    const std::vector<std::string> actions = currentWordActions();
-    const PopUpBounds box = PopUp::bounds(renderer, static_cast<int>(actions.size()));
-    PopUp::background(renderer, box);
-    PopUp::title(renderer, box, word.text);
-    PopUp::list(renderer, box, actions, -1, 0);
-    PopUp::border(renderer, box);
+  if (wordActionsOpen_ && !wordSelectionHandleDragActive_) {
+    drawWordSelectionActionBar(word);
   }
 
   renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+}
+
+void EpubActivity::drawWordSelectionRange() {
+  if (wordSelectionAnchor_ < 0 || wordSelectionFocus_ < 0 || touchWords_.empty()) {
+    return;
+  }
+  const size_t lo = static_cast<size_t>(std::min(wordSelectionAnchor_, wordSelectionFocus_));
+  const size_t hi = static_cast<size_t>(std::max(wordSelectionAnchor_, wordSelectionFocus_));
+  if (lo >= touchWords_.size() || hi >= touchWords_.size()) {
+    return;
+  }
+
+  size_t first = lo;
+  while (first <= hi) {
+    const int lineY = touchWords_[first].screenY;
+    size_t last = first + 1;
+    int minX = touchWords_[first].screenX;
+    int maxR = touchWords_[first].screenX + touchWords_[first].screenW;
+    int lineHeight = std::max(3, touchWords_[first].screenH);
+    while (last <= hi && touchWords_[last].screenY == lineY) {
+      minX = std::min(minX, touchWords_[last].screenX);
+      maxR = std::max(maxR, touchWords_[last].screenX + touchWords_[last].screenW);
+      lineHeight = std::max(lineHeight, std::max(3, touchWords_[last].screenH));
+      ++last;
+    }
+    renderer.ui.fillSparseInkLatticeInRect(minX, std::max(0, lineY), std::max(1, maxR - minX), lineHeight, 2);
+    first = last;
+  }
+}
+
+void EpubActivity::drawWordSelectionHandles() {
+  if (wordSelectionAnchor_ < 0 || wordSelectionFocus_ < 0 || touchWords_.empty()) {
+    return;
+  }
+  const size_t lo = static_cast<size_t>(std::min(wordSelectionAnchor_, wordSelectionFocus_));
+  const size_t hi = static_cast<size_t>(std::max(wordSelectionAnchor_, wordSelectionFocus_));
+  if (lo >= touchWords_.size() || hi >= touchWords_.size()) {
+    return;
+  }
+
+  const PageWordHit& first = touchWords_[lo];
+  const PageWordHit& last = touchWords_[hi];
+  const int lineTop = first.screenY;
+  const int firstLineBottom = first.screenY + std::max(3, first.screenH);
+  const int lastLineTop = last.screenY;
+  const int startX = first.screenX;
+  const int startCenterY = std::max(kWordSelectionHandleRadius, lineTop - kWordSelectionHandleRadius);
+  const int endX = last.screenX + std::max(1, last.screenW);
+  const int endCenterY = std::min(renderer.getScreenHeight() - kWordSelectionHandleRadius,
+                                  last.screenY + std::max(3, last.screenH) + kWordSelectionHandleRadius);
+
+  renderer.line.render(startX, startCenterY + kWordSelectionHandleRadius, startX, firstLineBottom, true);
+  renderer.line.render(startX + 1, startCenterY + kWordSelectionHandleRadius, startX + 1, firstLineBottom, true);
+  renderer.circle.render(startX, startCenterY, kWordSelectionHandleRadius, true);
+  renderer.circle.render(startX, startCenterY, kWordSelectionHandleRadius - 2, false);
+  renderer.line.render(endX, lastLineTop, endX, endCenterY - kWordSelectionHandleRadius, true);
+  renderer.line.render(endX + 1, lastLineTop, endX + 1, endCenterY - kWordSelectionHandleRadius, true);
+  renderer.circle.render(endX, endCenterY, kWordSelectionHandleRadius, true);
+  renderer.circle.render(endX, endCenterY, kWordSelectionHandleRadius - 2, false);
+}
+
+int EpubActivity::wordSelectionHandleAt(const int x, const int y) const {
+  if (wordSelectionAnchor_ < 0 || wordSelectionFocus_ < 0 || touchWords_.empty()) {
+    return -1;
+  }
+  const size_t lo = static_cast<size_t>(std::min(wordSelectionAnchor_, wordSelectionFocus_));
+  const size_t hi = static_cast<size_t>(std::max(wordSelectionAnchor_, wordSelectionFocus_));
+  if (lo >= touchWords_.size() || hi >= touchWords_.size()) {
+    return -1;
+  }
+
+  const PageWordHit& first = touchWords_[lo];
+  const PageWordHit& last = touchWords_[hi];
+  const int startX = first.screenX;
+  const int startY = std::max(kWordSelectionHandleRadius, first.screenY - kWordSelectionHandleRadius);
+  const int endX = last.screenX + std::max(1, last.screenW);
+  const int endY = std::min(renderer.getScreenHeight() - kWordSelectionHandleRadius,
+                            last.screenY + std::max(3, last.screenH) + kWordSelectionHandleRadius);
+  const int hitRadius = kWordSelectionHandleRadius + 8;
+  const int startDx = x - startX;
+  const int startDy = y - startY;
+  if (startDx * startDx + startDy * startDy <= hitRadius * hitRadius) {
+    return 0;
+  }
+  const int endDx = x - endX;
+  const int endDy = y - endY;
+  if (endDx * endDx + endDy * endDy <= hitRadius * hitRadius) {
+    return 1;
+  }
+  return -1;
+}
+
+bool EpubActivity::wordSelectionActionBarBounds(const PageWordHit& word, int& x, int& y, int& width, int& height,
+                                                std::vector<int>* itemWidths) const {
+  if (!wordSelectionOpen_ || !wordActionsOpen_) {
+    return false;
+  }
+
+  const int font = MONTSERRAT_8_FONT_ID;
+  const std::vector<std::string> actions = currentWordActions();
+  if (actions.empty()) {
+    return false;
+  }
+
+  const bool vertical = kWordSelectionActionBarVertical;
+  width = 0;
+  height = vertical ? Button::height * static_cast<int>(actions.size()) : Button::height;
+  if (itemWidths) {
+    itemWidths->clear();
+  }
+  for (const std::string& action : actions) {
+    const int itemWidth = Button::width(renderer, action.c_str(), font);
+    width = vertical ? std::max(width, itemWidth) : width + itemWidth;
+    if (itemWidths) {
+      itemWidths->push_back(itemWidth);
+    }
+  }
+  // Give the vertical action panel enough breathing room that it reads as a
+  // proper menu and does not crowd the system-font text at the right edge.
+  if (vertical) {
+    width += 20;
+  }
+
+  constexpr int margin = 15;
+  const int lineBottom = word.screenY + std::max(3, word.screenH);
+  const int anchorX = word.screenX + std::max(1, word.screenW);
+  x = anchorX - width / 2;
+  y = lineBottom + kWordSelectionHandleRadius + kWordSelectionActionGap;
+  x = std::max(margin, std::min(x, renderer.getScreenWidth() - margin - width));
+  if (y + height > renderer.getScreenHeight() - margin) {
+    y = std::max(margin, word.screenY - height - kWordSelectionHandleRadius - kWordSelectionActionGap);
+  }
+  return true;
+}
+
+void EpubActivity::drawWordSelectionActionBar(const PageWordHit& word) {
+  int x = 0;
+  int y = 0;
+  int width = 0;
+  int height = 0;
+  std::vector<int> itemWidths;
+  if (!wordSelectionActionBarBounds(word, x, y, width, height, &itemWidths)) {
+    return;
+  }
+
+  const std::vector<std::string> actions = currentWordActions();
+  const bool vertical = kWordSelectionActionBarVertical;
+  renderer.rectangle.fill(x, y, width, height, false, vertical ? false : true, false);
+  renderer.rectangle.render(x, y, width, height, true, vertical ? false : true, false);
+
+  const int font = systemFontId();
+  const int textHeight = renderer.text.getLineHeight(font);
+  const int textY = y + (height - textHeight) / 2;
+  if (vertical) {
+    constexpr int verticalTextPadding = 16;
+    for (size_t i = 0; i < actions.size(); ++i) {
+      const int rowY = y + static_cast<int>(i) * Button::height;
+      renderer.text.render(font, x + verticalTextPadding, rowY + (Button::height - textHeight) / 2,
+                           actions[i].c_str(), true,
+                           EpdFontFamily::REGULAR);
+      if (i + 1 < actions.size()) {
+        renderer.line.render(x + 8, rowY + Button::height, x + width - 8, rowY + Button::height, true,
+                             LineRender::Style::Dotted);
+      }
+    }
+    return;
+  }
+
+  int itemX = x;
+  for (size_t i = 0; i < actions.size(); ++i) {
+    const int textWidth = renderer.text.getWidth(font, actions[i].c_str());
+    renderer.text.render(font, itemX + (itemWidths[i] - textWidth) / 2, textY, actions[i].c_str(), true,
+                         EpdFontFamily::REGULAR);
+    itemX += itemWidths[i];
+    if (i + 1 < actions.size()) {
+      renderer.line.render(itemX, y + 8, itemX, y + height - 8, true, LineRender::Style::Dotted);
+    }
+  }
 }
 
 bool EpubActivity::openWordSelection(const int x, const int y) {
@@ -764,32 +973,48 @@ bool EpubActivity::openWordSelection(const int x, const int y) {
 
   wordSelectionOpen_ = true;
   wordActionsOpen_ = true;
+  wordSelectionAnchor_ = selectedWord_;
+  wordSelectionFocus_ = selectedWord_;
+  wordSelectionHandleDragActive_ = false;
+  wordSelectionDraggingStart_ = false;
+  wordSelectionDraggingOnWord_ = false;
+  annUi_.captureExternalFramebuffer(*this);
   renderWordSelection();
   return true;
 }
 
 void EpubActivity::startVoiceNoteForSelection(const std::string& selectedText, const uint16_t wordLo,
-                                              const uint16_t wordHi) {
+                                              const uint16_t wordHi, const bool attachToHighlight) {
 #if !FREEINK_CAP_MIC
-  // X4 Pro has no microphone. Use the shared keyboard entry instead and keep the note
-  // attached to the selected annotation, just like the microphone path on Sticky.
-  (void)wordLo;
-  (void)wordHi;
   if (selectedText.empty()) {
     return;
   }
   enterNewActivity(new KeyboardEntryActivity(
       renderer, mappedInput, "Add note", "", 10, 256, false,
-      [this](const std::string& note) {
+      [this, selectedText, wordLo, wordHi, attachToHighlight](const std::string& note) {
         exitActivity();
-        if (!note.empty() && annUi_.isActive()) {
-          annUi_.setPendingNoteText(note);
+        if (!note.empty()) {
+          if (attachToHighlight) {
+            if (!annUi_.saveExternalHighlight(*this, selectedText, wordLo, wordHi, note)) {
+              readerPopup("Could not save note");
+            }
+          } else if (annUi_.isActive()) {
+            annUi_.setPendingNoteText(note);
+          }
         }
-        updateRequired = true;
+        if (attachToHighlight) {
+          restoreWordSelectionAfterNote();
+        } else {
+          updateRequired = true;
+        }
       },
-      [this]() {
+      [this, attachToHighlight]() {
         exitActivity();
-        updateRequired = true;
+        if (attachToHighlight) {
+          restoreWordSelectionAfterNote();
+        } else {
+          updateRequired = true;
+        }
       }));
   return;
 #else
@@ -800,23 +1025,47 @@ void EpubActivity::startVoiceNoteForSelection(const std::string& selectedText, c
   const std::string voiceDirectory = epub->getCachePath() + "/voice";
   enterNewActivity(new VoiceNoteActivity(
       renderer, mappedInput, voiceDirectory,
-      [this](const std::string& audioPath, const bool success) {
+      [this, selectedText, wordLo, wordHi, attachToHighlight](const std::string& audioPath, const bool success) {
         INX_SERIAL.printf("[%lu] [VOICE-NOTE] captured path=%s success=%d\n", millis(), audioPath.c_str(),
                           success ? 1 : 0);
         exitActivity();
-        if (success && annUi_.isActive()) {
+        if (success && attachToHighlight) {
+          if (!annUi_.saveExternalHighlight(*this, selectedText, wordLo, wordHi, {}, audioPath)) {
+            readerPopup("Could not save note");
+          }
+        } else if (success && annUi_.isActive()) {
           annUi_.setPendingNoteAudioPath(audioPath);
         } else if (!success) {
           readerPopup("Could not record note");
         }
-        updateRequired = true;
+        if (attachToHighlight) {
+          restoreWordSelectionAfterNote();
+        } else {
+          updateRequired = true;
+        }
       },
-      [this]() {
+      [this, attachToHighlight]() {
         exitActivity();
-        updateRequired = true;
+        if (attachToHighlight) {
+          restoreWordSelectionAfterNote();
+        } else {
+          updateRequired = true;
+        }
       }));
-*/
-#endif  // FREEINK_CAP_MIC
+#endif
+}
+
+void EpubActivity::restoreWordSelectionAfterNote() {
+  if (!wordSelectionOpen_ || selectedWord_ < 0 || selectedWord_ >= static_cast<int>(touchWords_.size())) {
+    updateRequired = true;
+    return;
+  }
+
+  wordActionsOpen_ = true;
+  INX_SERIAL.printf("[%lu] [WORD_SELECTION] restored after note anchor=%d focus=%d\n", millis(),
+                    wordSelectionAnchor_, wordSelectionFocus_);
+  renderWordSelection();
+}
 }
 
 bool EpubActivity::handleWordTouch() {
@@ -833,7 +1082,6 @@ bool EpubActivity::handleWordTouch() {
   const int x = static_cast<int>(tapNx * renderer.getScreenWidth());
   const int y = static_cast<int>(tapNy * renderer.getScreenHeight());
   if (mappedInput.lastTouchHeldMs() < wordSelectionHoldMs) {
-    // Short taps remain reader navigation; a word action menu is intentional only on a long press.
     mappedInput.restoreTouchTapInScreen(renderer, tapNx, tapNy);
     return false;
   }
@@ -841,7 +1089,6 @@ bool EpubActivity::handleWordTouch() {
   INX_SERIAL.printf("[%lu] [WORD_SELECTION] long touch=(%d,%d) held=%lu\n", millis(), x, y,
                 mappedInput.lastTouchHeldMs());
   if (!openWordSelection(x, y)) {
-    // A long press outside text is intentionally consumed without opening an action menu.
     return false;
   }
 
@@ -859,7 +1106,6 @@ bool EpubActivity::handleTopRightTap() {
     return false;
   }
 
-  // Keep held taps available for word selection and ordinary taps for page turns.
   if (mappedInput.lastTouchHeldMs() >= wordSelectionHoldMs ||
       tapX * renderer.getScreenWidth() < renderer.getScreenWidth() - 80 || tapY * renderer.getScreenHeight() >= 80) {
     mappedInput.restoreTouchTapInScreen(renderer, tapX, tapY);
@@ -881,8 +1127,6 @@ bool EpubActivity::handleImageTouch() {
     return false;
   }
 
-  // Inline images frequently occupy the same screen halves used for page turns. Only a deliberate
-  // hold opens the image viewer; ordinary taps go back through the reader's page-turn handler.
   if (mappedInput.lastTouchHeldMs() < wordSelectionHoldMs) {
     mappedInput.restoreTouchTapInScreen(renderer, tapNx, tapNy);
     return false;
@@ -914,6 +1158,52 @@ bool EpubActivity::handleWordSelection() {
     return false;
   }
 
+  if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+    closeWordSelection();
+    renderScreen(true);
+    return true;
+  }
+
+  if (wordSelectionHandleDragActive_) {
+    float nx = 0.0f;
+    float ny = 0.0f;
+    if (mappedInput.isTouchHeldInScreen(renderer, nx, ny)) {
+      const int x = static_cast<int>(nx * renderer.getScreenWidth());
+      const int y = static_cast<int>(ny * renderer.getScreenHeight());
+      const int word = wordAt(x, y);
+      wordSelectionDraggingOnWord_ = word >= 0;
+      if (word >= 0) {
+        if (wordSelectionDraggingStart_) {
+          wordSelectionAnchor_ = word;
+        } else {
+          wordSelectionFocus_ = word;
+        }
+        selectedWord_ = wordSelectionDraggingStart_ ? wordSelectionAnchor_ : wordSelectionFocus_;
+        renderWordSelection();
+      }
+      return true;
+    }
+
+    wordSelectionHandleDragActive_ = false;
+    wordActionsOpen_ = wordSelectionDraggingOnWord_;
+    renderWordSelection();
+    return true;
+  }
+
+  float pressNx = 0.0f;
+  float pressNy = 0.0f;
+  if (mappedInput.wasTouchPressedInScreen(renderer, pressNx, pressNy)) {
+    const int pressX = static_cast<int>(pressNx * renderer.getScreenWidth());
+    const int pressY = static_cast<int>(pressNy * renderer.getScreenHeight());
+    const int handle = wordSelectionHandleAt(pressX, pressY);
+    if (handle >= 0) {
+      wordSelectionHandleDragActive_ = true;
+      wordSelectionDraggingStart_ = handle == 0;
+      wordSelectionDraggingOnWord_ = true;
+      return true;
+    }
+  }
+
   if (mappedInput.wasTouchSwipeUp() || mappedInput.wasTouchSwipeDown() || mappedInput.wasTouchSwipeLeft() ||
       mappedInput.wasTouchSwipeRight()) {
     closeWordSelection();
@@ -932,6 +1222,27 @@ bool EpubActivity::handleWordSelection() {
   INX_SERIAL.printf("[%lu] [WORD_SELECTION] touch=(%d,%d) actions=%d spine=%d page=%d\n", millis(), x, y,
                 wordActionsOpen_ ? 1 : 0, currentSpineIndex, section ? section->currentPage : -1);
 
+  auto focusWordFromTap = [this](const int tappedWord) {
+    const int currentLo = std::min(wordSelectionAnchor_, wordSelectionFocus_);
+    const int currentHi = std::max(wordSelectionAnchor_, wordSelectionFocus_);
+    if (tappedWord < currentLo) {
+      // Expand toward the beginning while preserving the current end.
+      wordSelectionAnchor_ = tappedWord;
+      wordSelectionFocus_ = currentHi;
+    } else if (tappedWord > currentHi) {
+      // Expand toward the end while preserving the current beginning.
+      wordSelectionAnchor_ = currentLo;
+      wordSelectionFocus_ = tappedWord;
+    } else {
+      // Move the active endpoint when tapping inside the current range.
+      wordSelectionFocus_ = tappedWord;
+    }
+    selectedWord_ = tappedWord;
+    // For a range, currentWordActions() removes only Look up and keeps the
+    // Highlight/Add note menu visible.
+    wordActionsOpen_ = true;
+  };
+
   if (!wordActionsOpen_) {
     const int word = wordAt(x, y);
     if (word < 0) {
@@ -939,40 +1250,124 @@ bool EpubActivity::handleWordSelection() {
       renderScreen(true);
       return true;
     }
-    selectedWord_ = word;
-    wordActionsOpen_ = true;
+    focusWordFromTap(word);
     renderWordSelection();
     return true;
   }
 
+  const size_t actionWordIndex = static_cast<size_t>(std::max(wordSelectionAnchor_, wordSelectionFocus_));
+  const PageWordHit& selected = touchWords_[actionWordIndex < touchWords_.size() ? actionWordIndex
+                                                                                   : static_cast<size_t>(selectedWord_)];
+  int barX = 0;
+  int barY = 0;
+  int barWidth = 0;
+  int barHeight = 0;
+  std::vector<int> itemWidths;
   const std::vector<std::string> actions = currentWordActions();
-  const PopUpBounds box = PopUp::bounds(renderer, static_cast<int>(actions.size()));
-  const int listY = box.y + box.header;
-  if (x < box.x || x >= box.x + box.width || y < listY || y >= listY + box.row * box.rows) {
+  if (!wordSelectionActionBarBounds(selected, barX, barY, barWidth, barHeight, &itemWidths) || x < barX ||
+      x >= barX + barWidth || y < barY || y >= barY + barHeight) {
+    const int tappedWord = wordAt(x, y);
+    if (tappedWord >= 0) {
+      focusWordFromTap(tappedWord);
+      INX_SERIAL.printf("[%lu] [WORD_SELECTION] focus word=%d anchor=%d multiple=%d\n", millis(), tappedWord,
+                    wordSelectionAnchor_, wordSelectionIsMultiple() ? 1 : 0);
+      renderWordSelection();
+      return true;
+    }
     closeWordSelection();
     renderScreen(true);
     return true;
   }
 
-  const int action = (y - listY) / box.row;
+  int action = -1;
+  if (kWordSelectionActionBarVertical) {
+    const int row = (y - barY) / Button::height;
+    if (row >= 0 && row < static_cast<int>(actions.size())) {
+      action = row;
+    }
+  } else {
+    int actionX = barX;
+    for (size_t i = 0; i < itemWidths.size(); ++i) {
+      if (x >= actionX && x < actionX + itemWidths[i]) {
+        action = static_cast<int>(i);
+        break;
+      }
+      actionX += itemWidths[i];
+    }
+  }
+  if (action < 0 || action >= static_cast<int>(actions.size())) {
+    return true;
+  }
   INX_SERIAL.printf("[%lu] [WORD_SELECTION] action=%d spine=%d page=%d\n", millis(), action, currentSpineIndex,
                 section ? section->currentPage : -1);
+  const int wordLo = std::min(wordSelectionAnchor_, wordSelectionFocus_);
+  const int wordHi = std::max(wordSelectionAnchor_, wordSelectionFocus_);
+  std::string selectedText;
+  for (int i = wordLo; i <= wordHi && i >= 0 && i < static_cast<int>(touchWords_.size()); ++i) {
+    if (!selectedText.empty()) {
+      selectedText += ' ';
+    }
+    selectedText += touchWords_[static_cast<size_t>(i)].text;
+  }
   const PageWordHit word = touchWords_[static_cast<size_t>(selectedWord_)];
-  closeWordSelection();
-  renderScreen(true);
+  const std::string actionLabel = actions[static_cast<size_t>(action)];
+  const bool keepSelectionForNote = actionLabel == "Add note";
+  bool highlighted = false;
+  bool pluginActionSucceeded = false;
+  std::string pluginId;
+  std::string pluginLabel;
+  std::string pluginFunction;
+  const bool hasPluginAction = PluginManager::findReaderSelectionPlugin(pluginId, pluginLabel, pluginFunction);
+  if (actionLabel == "Highlight") {
+    highlighted = annUi_.saveExternalHighlight(*this, selectedText, static_cast<size_t>(wordLo),
+                                                static_cast<size_t>(wordHi));
+  } else if (epub && section && hasPluginAction && actionLabel == pluginLabel) {
+    std::string luaError;
+    pluginActionSucceeded = PluginManager::invoke(
+        pluginId.c_str(), pluginFunction.c_str(),
+      [&](lua_State* state) {
+        lua_newtable(state);
+        const std::string book = epub->getTitle();
+        const std::string chapter = getCurrentChapterTitle();
+        lua_pushlstring(state, selectedText.c_str(), selectedText.size());
+        lua_setfield(state, -2, "selected_text");
+        lua_pushlstring(state, selectedText.c_str(), selectedText.size());
+        lua_setfield(state, -2, "selection_context");
+        lua_pushlstring(state, book.c_str(), book.size());
+        lua_setfield(state, -2, "book_title");
+        lua_pushlstring(state, chapter.c_str(), chapter.size());
+        lua_setfield(state, -2, "chapter_title");
+        lua_pushinteger(state, static_cast<lua_Integer>(section->currentPage));
+        lua_setfield(state, -2, "page_number");
+        lua_pushinteger(state, static_cast<lua_Integer>(currentSpineIndex));
+        lua_setfield(state, -2, "spine_index");
+        lua_pushinteger(state, static_cast<lua_Integer>(millis() / 1000));
+        lua_setfield(state, -2, "timestamp");
+      },
+        luaError);
+    if (!pluginActionSucceeded) INX_SERIAL.printf("[LUA] reader plugin action failed: %s\n", luaError.c_str());
+  }
+  if (!keepSelectionForNote) {
+    closeWordSelection();
+    renderScreen(true);
+  }
   pauseReadingStats();
 
-  if (action == 0) {
+  if (actionLabel == "Look up") {
     if (!dictUi_.lookupAt(*this, word.screenX + word.screenW / 2, word.screenY + word.screenH / 2)) {
       renderScreen(true);
     }
-  } else if (action == 1) {
-    if (!annUi_.startAt(*this, word.screenX + word.screenW / 2, word.screenY + word.screenH / 2)) {
-      renderScreen(true);
+  } else if (actionLabel == "Highlight") {
+    if (!highlighted) {
+      readerPopup("Could not save highlight");
     }
-  } else if (action == 2) {
+  } else if (actionLabel == "Add note") {
     startVoiceNoteForPage();
-  } else if (action == 3 && !word.footnoteTarget.empty()) {
+  } else if (actionLabel == "Add note") {
+    startVoiceNoteForSelection(selectedText, static_cast<uint16_t>(wordLo), static_cast<uint16_t>(wordHi), true);
+  } else if (hasPluginAction && actionLabel == pluginLabel) {
+    readerPopup(pluginActionSucceeded ? "Plugin action completed" : "Plugin action failed", 1400);
+  } else if (actionLabel == "View footnote" && !word.footnoteTarget.empty()) {
     footnoteBody_.show(*this, word.footnoteTarget, word.text);
   }
   return true;
@@ -982,8 +1377,6 @@ bool EpubActivity::handleWordSelection() {
  * @brief Called when exiting the activity
  */
 void EpubActivity::onExit() {
-  // NOTE: tap/swipe/held-touch discarding now happens centrally in switchTo() (main.cpp)
-  // so every activity transition is covered, not just this one.
   invalidatePreparedPage();
   const bool clearImagePageOnExit = lastPageHadImages;
   closeWordSelection();
@@ -1030,17 +1423,13 @@ void EpubActivity::onExit() {
 
   renderer.resetTransientReaderState();
 
-
-
-  
-  const bool clearOnExit = clearImagePageOnExit || FREEINK_DEVICE_X4PRO;
-
-  if (clearOnExit) {
+  if (clearImagePageOnExit) {
     renderer.clearScreen(0xFF);
-    renderer.displayBuffer(HalDisplay::HALF_REFRESH);
+    renderer.displayBuffer(FREEINK_DEVICE_X4PRO ? HalDisplay::FULL_REFRESH : HalDisplay::HALF_REFRESH);
   }
 
   FontManager::unloadAllSDFonts();
+  LanguageManager::setBookLanguage("");
 
   ActivityWithSubactivity::onExit();
 }
@@ -1054,6 +1443,18 @@ void EpubActivity::loop() {
   if (subActivity) {
     subActivity->loop();
     consumePageNoteVoiceCompletion();
+    return;
+  }
+
+  if (bookFinished_) {
+    if (handleFinishedBookInput()) return;
+    return;
+  }
+
+  if (readerPopupExpiresAt_ != 0 && static_cast<int32_t>(millis() - readerPopupExpiresAt_) >= 0) {
+    readerPopupExpiresAt_ = 0;
+    updateRequired = false;
+    renderScreen(true);
     return;
   }
 
@@ -1081,7 +1482,6 @@ void EpubActivity::loop() {
       updateRequired = false;
       annUi_.repaint(*this);
     } else if (updateRequired) {
-      // handleInput may have called exit() (Save/Back): repaint() no-ops when inactive; must full compose reader.
       INX_SERIAL.printf("[%lu] [ANNOTATION] redraw after exit spine=%d page=%d\n", millis(), currentSpineIndex,
                     section ? section->currentPage : -1);
       updateRequired = false;
@@ -1116,8 +1516,6 @@ void EpubActivity::loop() {
 
   if (orientationPicker_.isActive()) {
     orientationPicker_.handleInput(*this);
-    // handleInput() already repaints inline (popup redraw on Up/Down, renderScreen(true) on Back) -
-    // Confirm instead sets isToggleClosed so the block below performs the actual relayout next loop().
     return;
   }
 
@@ -1151,8 +1549,6 @@ void EpubActivity::loop() {
       updateRequired = true;
       lastAutoPageTurnTime = millis();
     } else if (updateRequired) {
-      // Dark mode changes only the renderer's visual output. Redraw the current page immediately,
-      // without rebuilding its layout or pagination.
       updateRequired = false;
       renderScreen(true);
     }
@@ -1166,6 +1562,9 @@ void EpubActivity::loop() {
                                     (settingsDrawer && settingsDrawer->shouldUpdate()) ||
                                     (bookSettings.orientation != bookLayoutAppliedOrientation_);
     if (layoutNeedsRebuild) {
+      if (settingsDrawer) settingsDrawer->hide();
+      settingsDrawerVisible = false;
+      renderScreen(true);
       applyBookSettings();
       if (settingsDrawer) {
         settingsDrawer->clearUpdateFlag();
@@ -1190,37 +1589,23 @@ void EpubActivity::loop() {
     dictUi_.tryChordEnter(*this);
   }
 
-  // A chord above may have just opened the annotation/dictionary overlay this same frame, with
-  // Down+Right/Down+Left still physically held. Both overlays already reset btnBindings_'s
-  // press-state in their enter(), but calling handleInput() below would immediately re-observe
-  // those still-held buttons and re-arm them - freezing a "held" state for the whole overlay
-  // session that goes stale by the time it closes (same bug the reset() was meant to prevent, just
-  // deferred by one frame). Skip it entirely once an overlay has taken over input this frame.
   if (annUi_.isActive() || dictUi_.isActive()) {
     return;
   }
 
 #if FREEINK_DEVICE_X4PRO
-  // Edge bands adjust the frontlight; a middle swipe falls through to close/settings below.
-  if (frontlight_ui::handleEdgeSwipe(mappedInput, renderer)) {
+  if (!READER_SETTINGS.disableLightControl && frontlight_ui::handleEdgeSwipe(mappedInput, renderer)) {
     return;
   }
 #endif
 
-  // On the touch reader, an upward swipe from the reading view closes the book.  SettingsDrawer gets
-  // first chance to consume the same gesture while it is open, so its list can still paginate.
   if (mappedInput.wasTouchSwipeUpForRenderer(renderer)) {
     pauseReadingStats();
-    // Same settle delay the Back button uses below. Without it the exit repaint composes on
-    // top of a still-settling panel refresh and the page ghosts through; Back never showed it
-    // because it already waited here.
     vTaskDelay(pdMS_TO_TICKS(100));
     onGoBack();
     return;
   }
 
-  // On the touch reader, a downward swipe is the direct gesture for book settings. Handle it before the
-  // configurable Down-button mapping so it cannot turn the page or trigger another reader action.
   if (mappedInput.wasTouchSwipeDownForRenderer(renderer)) {
     pauseReadingStats();
     toggleSettingsDrawer();
@@ -1230,10 +1615,29 @@ void EpubActivity::loop() {
 
   const bool readerTouchEnabled = !settingsDrawer || settingsDrawer->isTouchEnabled();
 
-  if (readerTouchEnabled && mappedInput.wasTouchSwipeRightForRenderer(renderer)) {
-    pauseReadingStats();
-    openTableOfContents();
+  if (readerTouchEnabled && annUi_.handlePreEntryTouchGesture(*this)) {
     return;
+  }
+
+  if (readerTouchEnabled) {
+    if (READER_SETTINGS.pageTurnMode == ReaderSetting::PAGE_TURN_SWIPE) {
+      if (mappedInput.wasTouchSwipeLeftForRenderer(renderer)) {
+        endPageTimer();
+        pageTurn(true);
+        lastAutoPageTurnTime = millis();
+        return;
+      }
+      if (mappedInput.wasTouchSwipeRightForRenderer(renderer)) {
+        endPageTimer();
+        pageTurn(false);
+        lastAutoPageTurnTime = millis();
+        return;
+      }
+    } else if (mappedInput.wasTouchSwipeRightForRenderer(renderer)) {
+      pauseReadingStats();
+      openTableOfContents();
+      return;
+    }
   }
 
   if (readerTouchEnabled && handlePageNoteTouch()) {
@@ -1252,15 +1656,10 @@ void EpubActivity::loop() {
     return;
   }
 
-  // Physical page-button handling is fixed in ReaderButtonBindings: short press turns a page and long
-  // press skips a chapter. Touch UI owns the reader tools and settings.
   if (btnBindings_.handleInput(*this)) {
     return;
   }
 
-  // Power (short-press only, no long-press pairing) shares the same READER_BUTTON_ACTION dispatcher
-  // as Quick Actions - see READER_SETTINGS.btnPowerShortAction's doc comment for why this supersedes
-  // the old 4-option readerShortPwrBtn.
   if (mappedInput.wasReleased(MappedInputManager::Button::Power)) {
     btnBindings_.dispatch(*this, READER_SETTINGS.btnPowerShortAction);
     return;
@@ -1275,13 +1674,13 @@ void EpubActivity::loop() {
     return;
   }
 
-  if (READER_SETTINGS.pageAutoTurnSeconds > 0 && (!navigation_ || !navigation_->isTocOpen()) && !settingsDrawerVisible) {
+  if (bookSettings.pageAutoTurnSeconds > 0 && (!navigation_ || !navigation_->isTocOpen()) && !settingsDrawerVisible) {
     if (lastAutoPageTurnTime == 0) {
       lastAutoPageTurnTime = millis();
     }
 
     unsigned long elapsed = millis() - lastAutoPageTurnTime;
-    if (elapsed >= (READER_SETTINGS.pageAutoTurnSeconds * 1000UL)) {
+    if (elapsed >= (bookSettings.pageAutoTurnSeconds * 1000UL)) {
       lastAutoPageTurnTime = millis();
       endPageTimer();
       (void)pageTurn(true);
@@ -1309,9 +1708,6 @@ void EpubActivity::loop() {
     return;
   }
 
-  // Compose one forward page only after the current page has been stable for a
-  // short idle window. The panel keeps displaying the active framebuffer while
-  // the inactive one is prepared; no display transaction occurs here.
   runIdlePreparedPage();
   runIdleSecondNextPage();
 }
@@ -1377,6 +1773,7 @@ uint32_t EpubActivity::preparedPageRenderSignature() {
   hash = addPreparedPageSignature(hash, floatBits(info.wordSpacing));
   hash = addPreparedPageSignature(hash, StatusBar::layoutSignature(bookSettings));
   hash = addPreparedPageSignature(hash, static_cast<uint32_t>(bookSettings.readingGuideLinesEnabled));
+  hash = addPreparedPageSignature(hash, static_cast<uint32_t>(bookSettings.darkMode));
   hash = addPreparedPageSignature(hash, static_cast<uint32_t>(READER_SETTINGS.readerImageGrayscale));
   hash = addPreparedPageSignature(hash, static_cast<uint32_t>(READER_SETTINGS.textAntiAliasing));
   hash = addPreparedPageSignature(hash, static_cast<uint32_t>(READER_SETTINGS.getRefreshFrequency()));
@@ -1389,9 +1786,6 @@ bool EpubActivity::canPrepareForwardPage() const {
     return false;
   }
 
-  // Stored highlights/page notes are overlaid through live annotation geometry.
-  // Other annotated pages do not matter; only hold back a prepared frame when
-  // its exact forward target has an overlay we would otherwise omit.
   const int targetPage = section->currentPage + 1;
   if (std::any_of(annUi_.annotations().records().begin(), annUi_.annotations().records().end(),
                   [this, targetPage](const EpubAnnotationRecord& record) {
@@ -1439,7 +1833,8 @@ bool EpubActivity::composePreparedForwardPage() {
   }
 
   const bool pageHasImages = page->hasImages();
-  const bool textAa = READER_SETTINGS.textAntiAliasing != 0 && renderer.text.supportsAntiAliasing(fontId);
+  const bool textAa = bookSettings.darkMode == 0 && READER_SETTINGS.textAntiAliasing != 0 &&
+                      renderer.text.supportsAntiAliasing(fontId);
   const bool readerImageTwoBit = READER_SETTINGS.readerImageGrayscale != 0 && pageHasImages;
   const bool highImageMode = READER_SETTINGS.readerImageGrayscale == SystemSetting::READER_IMAGE_HIGH && pageHasImages;
   const bool highQuality = highImageMode && page->anyImageNeedsGrayscale();
@@ -1450,8 +1845,6 @@ bool EpubActivity::composePreparedForwardPage() {
   const ImageRenderMode imageMode = readerImageTwoBit ? ImageRenderMode::TwoBit : ImageRenderMode::OneBit;
   const bool skipImagesInBase = needsImageGrayscale && highQuality;
 
-  // This is the framebuffer that is not on the panel. Keep this compositor
-  // deliberately display-free: the current page remains visible throughout.
   renderer.setRenderMode(GfxRenderer::BW);
   renderer.clearScreen(0xFF);
   page->render(renderer, fontId, headerFontId, info.totalMarginLeft, info.totalMarginTop, skipImagesInBase, imageMode,
@@ -1463,9 +1856,6 @@ bool EpubActivity::composePreparedForwardPage() {
     drawBookmarkIndicator();
   }
 
-  // The normal high-quality renderer shows this placeholder only while a
-  // two-bit display cache is still cold. Match that base frame precisely; the
-  // quality pass on the actual turn replaces it with the real image.
   const bool highQualityCacheReady =
       highQuality && page->allGrayscaleImagesCachedTwoBit(renderer, info.totalMarginLeft, info.totalMarginTop,
                                                           /*quality=*/true);
@@ -1502,9 +1892,6 @@ bool EpubActivity::composePreparedForwardPage() {
   preparedPage_.imagePlaceholder = imagePlaceholder;
   section->currentPage = savedPage;
 
-  INX_SERIAL.printf("[%lu] [EPA-PREP] ready spine=%d page=%d images=%d refresh=%d\n", millis(),
-                    preparedPage_.spineIndex, preparedPage_.pageIndex, hasImages ? 1 : 0,
-                    static_cast<int>(preparedPage_.refreshMode));
   return true;
 }
 
@@ -1519,16 +1906,11 @@ void EpubActivity::runIdlePreparedPage() {
     return;
   }
 
-  // The Section cache keeps previous/current/next serialized pages in PSRAM;
-  // do not chain more work after the one immediate forward page.
   preparePageAfterMs_ = 0;
   yield();
 }
 
 void EpubActivity::runIdleSecondNextPage() {
-  // The inactive framebuffer already contains currentPage + 1. Keep only the
-  // following page's serialized layout in the fourth PSRAM page-cache slot:
-  // no third framebuffer, image decode, or display-cache work happens here.
   if (!section || !preparedPage_.ready || preparedPage_.spineIndex != currentSpineIndex ||
       preparedPage_.pageIndex != section->currentPage + 1) {
     return;
@@ -1543,8 +1925,6 @@ void EpubActivity::runIdleSecondNextPage() {
   const bool cached = section->preloadPage(targetPage);
   preloadedPageSpineIndex_ = currentSpineIndex;
   preloadedPageIndex_ = targetPage;
-  INX_SERIAL.printf("[%lu] [EPA-PREP] page-cache spine=%d page=%d ok=%d\n", millis(), currentSpineIndex,
-                    targetPage, cached ? 1 : 0);
   yield();
 }
 
@@ -1562,7 +1942,8 @@ bool EpubActivity::finishPreparedPageGrayscale(const PreparedPage& prepared) {
   const int fontId = bookSettings.getReaderFontId();
   const int headerFontId = FontManager::getNextFont(fontId);
   const bool pageHasImages = page->hasImages();
-  const bool textAa = READER_SETTINGS.textAntiAliasing != 0 && renderer.text.supportsAntiAliasing(fontId);
+  const bool textAa = bookSettings.darkMode == 0 && READER_SETTINGS.textAntiAliasing != 0 &&
+                      renderer.text.supportsAntiAliasing(fontId);
   const bool readerImageTwoBit = READER_SETTINGS.readerImageGrayscale != 0 && pageHasImages;
   const bool highImageMode = READER_SETTINGS.readerImageGrayscale == SystemSetting::READER_IMAGE_HIGH && pageHasImages;
   const bool highQuality = highImageMode && page->anyImageNeedsGrayscale();
@@ -1571,9 +1952,6 @@ bool EpubActivity::finishPreparedPageGrayscale(const PreparedPage& prepared) {
       (highImageMode && !highQuality && textAa);
   const ImageRenderMode imageMode = readerImageTwoBit ? ImageRenderMode::TwoBit : ImageRenderMode::OneBit;
 
-  // Settings are included in the prepared-frame signature. Check the derived
-  // render decisions too, so a future setting added to the signature cannot
-  // accidentally apply a different grayscale sequence to this base frame.
   if (prepared.highQuality != highQuality || prepared.mediumImageGrayscale != mediumImageGrayscale ||
       prepared.textAntiAlias != textAa) {
     return false;
@@ -1583,9 +1961,6 @@ bool EpubActivity::finishPreparedPageGrayscale(const PreparedPage& prepared) {
     return true;
   }
 
-  // `displayBuffer()` just swapped the prepared BW base to the active buffer.
-  // Recreate the normal renderer's pre-display BW snapshot from that exact
-  // frame before asking the controller to run a grayscale pass.
   renderer.syncWriteBufferFromActive();
   const bool bwStored = renderer.storeBwBuffer();
   if (!bwStored) {
@@ -1603,10 +1978,6 @@ bool EpubActivity::finishPreparedPageGrayscale(const PreparedPage& prepared) {
                              /*onlyGrayscale=*/true);
         },
         kReaderHighQualityFastLut);
-    // X4 Pro cannot run an AA pass over a freshly rendered high-quality image without
-    // washing it out — its AA bank drives all four channels, so pixels the pass never
-    // repaints (skipImages=true) get driven anyway. Skip the pass there; every other board
-    // runs it exactly as before.
 #if FREEINK_DEVICE_X4PRO
     constexpr bool kAaAfterHqImage = false;
 #else
@@ -1642,8 +2013,6 @@ bool EpubActivity::finishPreparedPageGrayscale(const PreparedPage& prepared) {
   }
 
   if (highQuality) {
-    // Keep both host framebuffers and the controller's RED baseline on the
-    // exact B/W base that was displayed before the quality image overlay.
     renderer.clearScreen();
     page->render(renderer, fontId, headerFontId, info.totalMarginLeft, info.totalMarginTop, /*skipImages=*/true,
                  ImageRenderMode::OneBit, /*skipOnlyGrayscaleImages=*/true);
@@ -1669,17 +2038,6 @@ bool EpubActivity::presentPreparedForwardPage() {
 
   const PreparedPage presented = preparedPage_;
   section->currentPage = presented.pageIndex;
-  // Async: the buffer swap (and so the write buffer this function/finishPreparedPageGrayscale() draws
-  // into next) is already done by the time this returns - only the panel's own waveform still runs in
-  // the background. Every StickyDisplay call that actually needs the refresh finished (grayscale passes,
-  // the next page's displayBuffer()) already waits for it first via finish(), so this does not skip any
-  // required wait - it just stops blocking the common plain-text turn on the ~600ms e-ink refresh.
-  // If the page being replaced had a high-quality image, this turn does a HALF refresh, full
-  // stop. The prepared page's own refreshMode cannot decide this: prepareNextPage() runs BEFORE
-  // the previous page is presented, so it reads lastPageHadHighQualityImage while it is still
-  // stale. Decide it here, where the flag is current.
-  // X4 Pro takes a FULL refresh here, not Half: neither Half nor Fast clears what a quality
-  // pass leaves on these panels. Other devices keep Half.
   const HalDisplay::RefreshMode turnRefresh =
       lastPageHadHighQualityImage
           ? (FREEINK_DEVICE_X4PRO ? HalDisplay::FULL_REFRESH : HalDisplay::HALF_REFRESH)
@@ -1687,8 +2045,6 @@ bool EpubActivity::presentPreparedForwardPage() {
   renderer.displayBufferAsync(turnRefresh);
 
   if (!finishPreparedPageGrayscale(presented)) {
-    // The base is already visible. Fall back to the established full renderer
-    // from this exact page rather than risking a mismatched grayscale baseline.
     invalidatePreparedPage();
     renderScreen();
     return true;
@@ -1706,8 +2062,6 @@ bool EpubActivity::presentPreparedForwardPage() {
   invalidatePreparedPage();
   scheduleIdlePreparedPage();
 
-  INX_SERIAL.printf("[%lu] [EPA-PREP] displayed spine=%d page=%d\n", millis(), currentSpineIndex,
-                    section->currentPage);
   return true;
 }
 
@@ -1768,8 +2122,6 @@ void EpubActivity::jumpToPercent(int percent) {
  * @param forward True for forward page turn, false for backward
  */
 bool EpubActivity::pageTurn(bool forward) {
-  INX_SERIAL.printf("[%lu] [EPA] pageTurn forward=%d before spine=%d page=%d next=%d\n", millis(), forward ? 1 : 0,
-                currentSpineIndex, section ? section->currentPage : -1, nextPageNumber);
   if (!epub) {
     updateRequired = true;
     return false;
@@ -1790,15 +2142,11 @@ bool EpubActivity::pageTurn(bool forward) {
     section->currentPage = 0;
   }
 
-  // A prepared frame is valid only for this exact forward neighbour. Presenting
-  // it skips all page layout, image decode, font, and SD work on the turn.
   if (forward && presentPreparedForwardPage()) {
     startPageTimer();
     return true;
   }
 
-  // Any other navigation leaves the inactive framebuffer available for normal
-  // rendering; it must not later be mistaken for the old forward neighbour.
   invalidatePreparedPage();
 
   bool needSectionReset = false;
@@ -1838,8 +2186,6 @@ bool EpubActivity::pageTurn(bool forward) {
 
   startPageTimer();
   updateRequired = true;
-  INX_SERIAL.printf("[%lu] [EPA] pageTurn after spine=%d page=%d next=%d reload=%d\n", millis(), currentSpineIndex,
-                section ? section->currentPage : -1, nextPageNumber, needSectionReset ? 1 : 0);
   return false;
 }
 
@@ -1847,8 +2193,6 @@ bool EpubActivity::pageTurn(bool forward) {
  * @brief Renders the current screen content
  */
 void EpubActivity::renderScreen(const bool clearFramebuffer) {
-  // All normal rendering overwrites the writable framebuffer, so discard a
-  // pending page before entering any slow/current-page render path.
   invalidatePreparedPage();
   if (!epub) return;
 
@@ -1859,8 +2203,13 @@ void EpubActivity::renderScreen(const bool clearFramebuffer) {
 
   if (currentSpineIndex >= totalSpine) {
     renderer.clearScreen(0xFF);
+    if (!bookFinished_) {
+      bookFinished_ = true;
+      loadReaderSuggestion();
+    }
     displayBookStats();
     BOOK_STATE.setFinished(epub->getPath(), true);
+    renderReaderSuggestion();
     return;
   }
 
@@ -1882,8 +2231,13 @@ void EpubActivity::renderScreen(const bool clearFramebuffer) {
                     currentSpineIndex, totalSpine);
       if (currentSpineIndex >= totalSpine) {
         renderer.clearScreen(0xFF);
+        if (!bookFinished_) {
+          bookFinished_ = true;
+          loadReaderSuggestion();
+        }
         displayBookStats();
         BOOK_STATE.setFinished(epub->getPath(), true);
+        renderReaderSuggestion();
         return;
       }
       if (wasLayoutReload) {
@@ -1977,11 +2331,6 @@ void EpubActivity::renderContents(Page* page, const int orientedMarginTop,
       if (!section || !EpubAnnotations::recordTouchesPage(rec, currentSpineIndex, section->currentPage)) {
         continue;
       }
-      // A wildcard index always needed the word text for its search fallback. A stored phrase (rec.text)
-      // now also needs it: mergeStoredRangesForPage() verifies a precise index against that phrase before
-      // trusting it (a font/layout change repaginates the book, so a stale index can otherwise land on the
-      // wrong words entirely) and falls back to searching by phrase when it doesn't match - both need the
-      // actual word strings to compare against, not just the index.
       if (rec.pageWordLo == EpubAnnotations::kWildcard || !rec.text.empty()) {
         omitStoredWordStrings = false;
         break;
@@ -2026,11 +2375,9 @@ void EpubActivity::renderContents(Page* page, const int orientedMarginTop,
     }
   }
 
-  const bool textAa = READER_SETTINGS.textAntiAliasing != 0 && renderer.text.supportsAntiAliasing(fontId);
+  const bool textAa = bookSettings.darkMode == 0 && READER_SETTINGS.textAntiAliasing != 0 &&
+                      renderer.text.supportsAntiAliasing(fontId);
 
-  // Medium is the explicit grayscale mode: run its grayscale refresh for image pages. High stays selective so
-  // line-art/comic images can use the sharper 2-bit quantizer without paying for the quality grayscale pass. If
-  // text AA already needs a medium grayscale pass, include those non-quality High images in the same pass.
   const bool readerImageTwoBit = READER_SETTINGS.readerImageGrayscale != 0 && pageHasImages;
   const bool highImageMode = READER_SETTINGS.readerImageGrayscale == SystemSetting::READER_IMAGE_HIGH && pageHasImages;
   const bool highQuality = highImageMode && page->anyImageNeedsGrayscale();
@@ -2046,10 +2393,6 @@ void EpubActivity::renderContents(Page* page, const int orientedMarginTop,
 
   const bool needsTextAntiAliasPass = textAa;
 
-  // The cleanup refresh belongs to the PREVIOUS page. Gating this on
-  // highImageMode (the current page) skips the image -> text transition because
-  // the text page has no image, which leaves the previous high-quality image
-  // resident on the panel. Use the book setting plus the previous-page marker.
   const bool smartImageRefreshEnabled =
       READER_SETTINGS.readerImageGrayscale == SystemSetting::READER_IMAGE_HIGH && !isBookmarking && !annUi_.isActive();
   const bool smartRefreshAfterQualityImage = lastPageHadHighQualityImage;
@@ -2057,20 +2400,13 @@ void EpubActivity::renderContents(Page* page, const int orientedMarginTop,
   const int periodicRefreshPages = READER_SETTINGS.getRefreshFrequency();
   const bool periodicRefreshEnabled = periodicRefreshPages > 0;
 
-  // Sticky has enough PSRAM for chapter-time image display-cache warming, so render the complete page in the
-  // first framebuffer pass. Only high-quality grayscale images stay out of this BW base pass because they are
-  // intentionally sent through the dedicated quality LUT below.
   const bool skipImagesInPageRender = needsImageGrayscale && highQuality;
   if (skipImagesInPageRender) {
-    // The quality pass restores this base buffer before replacing the page's grayscale image rectangles. A
-    // normal page turn does not clear the framebuffer, so without this clear an image from the previous page
-    // can remain in the saved base wherever the new page has no image to overwrite it.
     renderer.clearScreen(0xFF);
   }
   page->render(renderer, fontId, headerFontId, orientedMarginLeft, orientedMarginTop, skipImagesInPageRender, imageMode,
                /*skipOnlyGrayscaleImages=*/highQuality);
 
-  // Overlay before storeBwBuffer so guide lines are preserved through AA/grayscale passes.
   ReadingGuideLines::render(renderer, *page, bookSettings.readingGuideLinesEnabled, orientedMarginTop,
                             orientedMarginRight, orientedMarginBottom, orientedMarginLeft, fontId);
 
@@ -2082,28 +2418,14 @@ void EpubActivity::renderContents(Page* page, const int orientedMarginTop,
     drawPageNoteIndicator();
   }
 
-  // Medium uses the same BW restore/rebase lifecycle as text AA. Without a
-  // snapshot when AA is disabled, the non-preserving grayscale cleanup leaves
-  // visible differential ghosting on the following page.
   const bool bwStored = (skipImagesInPageRender || mediumImageGrayscale || (needsTextAntiAliasPass && !highQuality)) &&
                         renderer.storeBwBuffer();
   const bool displayWithQualityPass = highQuality && bwStored;
   const bool smartRefreshThisPageAfterLargeImage = smartImageRefreshEnabled && smartRefreshAfterLargeImage;
-  // Async: any grayscale/AA pass that follows already blocks on the refresh finishing before it touches
-  // the panel again (every StickyDisplay call starts with finish()), so this only stops blocking the
-  // plain-text turn (no further passes needed) on the ~600ms e-ink refresh.
   auto displayPageBuffer = [this, smartRefreshThisPageAfterLargeImage, smartRefreshAfterQualityImage,
                             smartImageRefreshEnabled, periodicRefreshEnabled, periodicRefreshPages]() {
-    // A high-quality image ALWAYS gets cleaned up on the next page. It leaves charge no
-    // differential turn can neutralise, so it does not matter what the grayscale setting is,
-    // or whether bookmarking or the annotation UI happens to be up - all smartImageRefreshEnabled
-    // gated. Only the large-image and periodic cases stay conditional.
     if (smartRefreshThisPageAfterLargeImage || smartRefreshAfterQualityImage ||
         (periodicRefreshEnabled && pagesUntilFullRefresh <= 1)) {
-      // Same rule as the prepared-page path: after a quality image X4 Pro needs a FULL refresh,
-      // since neither Half nor Fast clears what the quality pass leaves. This fallback path is
-      // the one a turn takes when the prepared page was invalidated - which is common straight
-      // after an image page, so it must not be left on Half.
       const bool afterQualityImage = smartRefreshAfterQualityImage;
       renderer.displayBufferAsync((FREEINK_DEVICE_X4PRO && afterQualityImage)
                                       ? HalDisplay::FULL_REFRESH
@@ -2124,8 +2446,6 @@ void EpubActivity::renderContents(Page* page, const int orientedMarginTop,
   if (displayImagePlaceholder) {
     page->fillImageRects(renderer, orientedMarginLeft, orientedMarginTop, true, /*onlyGrayscale=*/true);
   }
-  // The quality waveform needs the BW page already on the panel as its base. This is especially important on
-  // the first render after entering the book: there is no previous page base for the grayscale pass to reuse.
   displayPageBuffer();
 
   if (highQuality && bwStored) {
@@ -2140,7 +2460,7 @@ void EpubActivity::renderContents(Page* page, const int orientedMarginTop,
         },
         kReaderHighQualityFastLut);
 #if FREEINK_DEVICE_X4PRO
-    constexpr bool kAaAfterHqImage = false;  // see the note above
+    constexpr bool kAaAfterHqImage = false;
 #else
     constexpr bool kAaAfterHqImage = true;
 #endif
@@ -2180,11 +2500,6 @@ void EpubActivity::renderContents(Page* page, const int orientedMarginTop,
 
   lastPageHadImages = pageHasImages;
   lastPageHadLargeImage = pageHasLargeImage;
-  // "Did this page render a high-quality image?" - nothing else. It used to be
-  // (highQuality && bwStored), which conflated it with whether a B/W snapshot was taken:
-  // bwStored needs skipImagesInPageRender || mediumImageGrayscale || (textAA && !highQuality),
-  // and that last term is false on a quality page by construction. So a plain HQ image page
-  // left this false and the next page never got its cleanup refresh.
   lastPageHadHighQualityImage = highQuality;
 
   if (annUi_.isActive()) {
@@ -2208,16 +2523,11 @@ void EpubActivity::renderContents(Page* page, const int orientedMarginTop,
         drawPageNoteIndicator();
       }
 
-      // Remove the quality image from the normal BW framebuffer before it is used to
-      // reseed the panel's differential buffer. `false` is paper/white; using `true`
-      // here seeds the next page with a black image rectangle that survives page turns.
       page->fillImageRects(renderer, orientedMarginLeft, orientedMarginTop, false, /*onlyGrayscale=*/true);
       renderer.cleanupGrayscaleWithFrameBuffer();
     }
 
     if (!annUi_.storedRanges().empty()) {
-      // Highlights must be the last composition step after a font/size repagination. Rebase from
-      // the page now on the panel so this fast update never restores pixels from an old page.
       renderer.syncWriteBufferFromActive();
       annUi_.drawStoredOverlay(*this);
       renderer.displayBuffer(HalDisplay::FAST_REFRESH);
@@ -2358,11 +2668,20 @@ void EpubActivity::loadBookSettings() {
   if (epub) {
     FontManager::scanSDFonts("/fonts");
     bool loaded = bookSettings.loadFromFile(epub->getCachePath());
-    if (!loaded || bookSettings.readerPresetIndex == 0) {
+    if (!loaded) {
+      READER_PRESETS.applyToBook(READER_PRESETS.defaultPresetIndex(), bookSettings);
+      // A newly opened book inherits the current system appearance even when
+      // the selected default reader preset was saved while light mode was on.
+      // Once the book has its own settings.bin, its dark-mode value remains
+      // independent and is restored below from that file.
+      bookSettings.darkMode = SETTINGS.darkMode ? 1 : 0;
+    } else if (bookSettings.readerPresetIndex == 0) {
       READER_PRESETS.applyToBook(0, bookSettings);
     } else {
       syncSettingsFromGlobalIfNeeded();
     }
+    // Book language selection is global; use the language enabled in Language Manager.
+    LanguageManager::setBookLanguage("");
     renderer.setDarkMode(bookSettings.darkMode != 0);
     pagesUntilFullRefresh = READER_SETTINGS.getRefreshFrequency();
   }
@@ -2377,9 +2696,6 @@ void EpubActivity::saveBookSettings() {
     return;
   }
 
-  // A book that still inherits the global Reader settings must not get a local
-  // settings file. Writing one here would make the next open treat the book as
-  // custom and would prevent later global Reader changes from reaching it.
   const std::string settingsPath = cachePath + "/settings.bin";
   if (!bookSettings.useCustomSettings) {
     if (SdMan.exists(settingsPath.c_str())) {
@@ -2417,10 +2733,13 @@ void EpubActivity::applyBookSettings() {
   setupOrientation();
 
   bookSettings.normalize();
+  // Book language selection is global; use the language enabled in Language Manager.
+  LanguageManager::setBookLanguage("");
   const int targetFontId = bookSettings.getReaderFontId();
   if (!FontManager::ensureReaderLayoutFonts(targetFontId, renderer)) {
     bookSettings = rollbackSettings;
     bookSettings.normalize();
+    LanguageManager::setBookLanguage("");
     renderer.setDarkMode(bookSettings.darkMode != 0);
     setupOrientation();
     bookLayoutAppliedOrientation_ = bookSettings.orientation;
@@ -2521,4 +2840,82 @@ void EpubActivity::displayBookStats() {
   if (epub) {
     readingStats_.display(renderer, *epub);
   }
+}
+
+void EpubActivity::loadReaderSuggestion() {
+  readerSuggestionAvailable_ = false;
+  readerSuggestionPath_.clear();
+  readerSuggestionTitle_.clear();
+  readerSuggestionGroup_.clear();
+  readerSuggestionLabel_.clear();
+  if (!epub) return;
+
+  PluginManager::ReaderSuggestionLink link;
+  if (!PluginManager::findReaderSuggestionPlugin(link)) return;
+
+  JsonDocument arguments;
+  arguments["path"] = epub->getPath();
+  arguments["title"] = epub->getTitle();
+  arguments["author"] = epub->getAuthor();
+  std::string argumentJson;
+  serializeJson(arguments, argumentJson);
+
+  std::string output;
+  std::string error;
+  if (!PluginManager::invokeStringJson(link.id.c_str(), link.function.c_str(), argumentJson, output, error)) return;
+
+  JsonDocument next;
+  if (deserializeJson(next, output) != DeserializationError::Ok || !next.is<JsonObject>()) return;
+  const char* path = next["path"] | "";
+  if (!path || !path[0]) return;
+  readerSuggestionPath_ = path;
+  readerSuggestionTitle_ = next["title"] | readerSuggestionPath_.c_str();
+  readerSuggestionGroup_ = next[link.groupField.c_str()] | "";
+  readerSuggestionLabel_ = link.label.empty() ? "Open suggested book" : link.label;
+  readerSuggestionAvailable_ = true;
+  INX_SERIAL.printf("[%lu] [PLUGIN] reader-suggestion plugin=%s path=%s\n", millis(), link.id.c_str(), path);
+}
+
+void EpubActivity::renderReaderSuggestion() {
+  if (!readerSuggestionAvailable_) return;
+  const int font = systemFontId();
+  const int width = renderer.getScreenWidth();
+  const int height = renderer.getScreenHeight();
+  if (!readerSuggestionGroup_.empty()) {
+    renderer.text.centered(MONTSERRAT_10_FONT_ID, height - Button::height - 58,
+                           readerSuggestionGroup_.c_str(), true);
+  }
+  const int buttonWidth = Button::width(renderer, readerSuggestionLabel_.c_str(), font);
+  const ButtonBounds button{(width - buttonWidth) / 2, height - Button::height - 20, buttonWidth, Button::height};
+  Button::render(renderer, button, readerSuggestionLabel_.c_str(), true, font);
+  renderer.text.centered(MONTSERRAT_8_FONT_ID, height - 8, readerSuggestionTitle_.c_str(), true);
+  renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+}
+
+bool EpubActivity::handleFinishedBookInput() {
+  if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+    onGoBack();
+    return true;
+  }
+
+  const int font = systemFontId();
+  const int buttonWidth = Button::width(renderer, readerSuggestionLabel_.c_str(), font);
+  const ButtonBounds button{(renderer.getScreenWidth() - buttonWidth) / 2,
+                            renderer.getScreenHeight() - Button::height - 20, buttonWidth, Button::height};
+  bool open = mappedInput.wasReleased(MappedInputManager::Button::Confirm);
+  if (mappedInput.hasTouch()) {
+    float nx = 0.0f;
+    float ny = 0.0f;
+    if (mappedInput.wasTouchTapInScreen(renderer, nx, ny)) {
+      const int x = static_cast<int>(nx * renderer.getScreenWidth());
+      const int y = static_cast<int>(ny * renderer.getScreenHeight());
+      open = x >= button.x && x < button.x + button.width && y >= button.y && y < button.y + button.height;
+    }
+  }
+  if (open && readerSuggestionAvailable_) {
+    const std::string path = readerSuggestionPath_;
+    openReaderFromCallback(path, onGoBack);
+    return true;
+  }
+  return false;
 }

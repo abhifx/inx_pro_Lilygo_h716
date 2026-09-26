@@ -25,8 +25,6 @@ class ChapterHtmlSlimParser;
  */
 class Section {
  public:
-  enum class IncrementalBuildStatus : uint8_t { Idle, Building, Ready, Failed };
-
  private:
   std::shared_ptr<Epub> epub;
   const int spineIndex;
@@ -41,21 +39,8 @@ class Section {
     uint32_t usedAt = 0;
     std::unique_ptr<Page> page;
   };
-  // The page data is mostly text/layout objects. Keep the previous, current,
-  // rendered-next, and layout-only next+1 objects in PSRAM. This removes the
-  // SD deserialize before the next compositor pass without caching pixels or
-  // an unbounded chapter.
   std::array<CachedPage, 4> pageCache{};
   uint32_t pageCacheClock = 0;
-  std::unique_ptr<ChapterHtmlSlimParser> incrementalParser_;
-  std::unique_ptr<Epub::ItemStream> incrementalStream_;
-  std::vector<uint32_t> incrementalLut_;
-  std::string incrementalTempPath_;
-  IncrementalBuildStatus incrementalBuildStatus_ = IncrementalBuildStatus::Idle;
-  size_t incrementalBytesParsed_ = 0;
-  size_t incrementalTotalBytes_ = 0;
-  uint32_t incrementalBuildStartedAt_ = 0;
-  uint32_t incrementalLastProgressLogAt_ = 0;
   void clearPageCache();
   Page* loadPage(int pageIndex);
 
@@ -149,21 +134,6 @@ class Section {
                          bool warmImageDisplayCache = false,
                          ImageRenderMode warmImageRenderMode = ImageRenderMode::OneBit, bool warmImageQuality = false,
                          int warmImageYOffset = 0);
-
-  /**
-   * Builds this section cooperatively to a temporary file. `stepIncrementalBuild`
-   * parses one bounded inflated chunk, so the reader can handle input between
-   * slices. A completed file is published only after its LUT/header
-   * have been written and validated.
-   */
-  bool beginIncrementalBuild(int fontId, int headerFontId, int maxFontId, float lineCompression, float wordSpacing,
-                             bool extraParagraphSpacing, uint8_t paragraphAlignment, uint16_t viewportWidth,
-                             uint16_t viewportHeight, bool hyphenationEnabled, bool respectCssParagraphIndent,
-                             bool bionicReadingEnabled, bool skipImages = false);
-  IncrementalBuildStatus stepIncrementalBuild(size_t maxInflatedBytes = 12 * 1024);
-  void cancelIncrementalBuild();
-  bool incrementalBuildActive() const { return incrementalParser_ != nullptr && incrementalStream_ != nullptr; }
-  IncrementalBuildStatus incrementalBuildStatus() const { return incrementalBuildStatus_; }
 
   /**
    * Loads a specific page from the section file.

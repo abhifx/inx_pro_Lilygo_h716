@@ -8,6 +8,7 @@
 
 #include <GfxRenderer.h>
 #include <WiFi.h>
+#include <esp_heap_caps.h>
 
 extern "C" {
 #include <esp_err.h>
@@ -20,13 +21,18 @@ extern "C" {
 #include "activity/util/KeyboardEntryActivity.h"
 #include "state/NetworkCredential.h"
 #include "system/Fonts.h"
+#include "system/LanguageManager.h"
 #include "system/ScreenComponents.h"
 #include "system/MappedInputManager.h"
 
 namespace {
 constexpr int LIST_ITEM_HEIGHT = Page::LIST_ITEM_HEIGHT;
 constexpr uint32_t scanMaxMs = 120;
-}  // namespace
+// Wi-Fi renders translated labels and may resolve the first non-ASCII glyph by
+// loading a streamed language font. TextRender also uses a bounded glyph buffer
+// on the task stack, so the old 4 KB stack was not sufficient for CJK packages.
+constexpr uint32_t WIFI_DISPLAY_TASK_STACK = 8192;
+}
 
 /**
  * @brief Static trampoline function for the display task
@@ -40,7 +46,7 @@ void WifiSelectionActivity::taskTrampoline(void* param) {
 void WifiSelectionActivity::scanTaskTrampoline(void* param) {
   auto* self = static_cast<WifiSelectionActivity*>(param);
   self->scanTaskLoop();
-  vTaskDelete(nullptr);
+  vTaskDeleteWithCaps(nullptr);
 }
 
 /**
@@ -51,26 +57,16 @@ void WifiSelectionActivity::onEnter() {
 
   renderingMutex = xSemaphoreCreateMutex();
 
-  // Wi-Fi is entered from screens that may have drawn 2-bit covers.  Rebase
-  // both the writable frame and the controller's previous-frame plane before
-  // the scanning/list screen issues its first FAST update.  This is RAM-plane
-  // synchronization only; it does not refresh the panel.
   renderer.syncWriteBufferFromActive();
   renderer.cleanupGrayscaleWithFrameBuffer();
 
   INX_SERIAL.printf("[%lu] [WIFI] enter mutex=%p mode=%d status=%d scan=%d\n", millis(), renderingMutex,
                  static_cast<int>(WiFi.getMode()), static_cast<int>(WiFi.status()), WiFi.scanComplete());
 
-  // Show the scanning state before loading credentials or initializing the radio. Those operations
-  // can block long enough to make the transition look like a blank screen. The first refresh is
-  // asynchronous so the activity handoff is not held up by the e-ink waveform.
   state = WifiSelectionState::SCANNING;
   updateRequired = true;
-  // The scanner is opened from another activity. Clear that previous page on
-  // the first scanning frame so it cannot remain visible behind the status.
   networkListFullRefreshRequired = true;
 
-  // Initialize all fields before loading credentials or starting the display task.
   selectedNetworkIndex = 0;
   selectedNetworkVisible = false;
   networks.clear();
@@ -82,8 +78,6 @@ void WifiSelectionActivity::onEnter() {
   forgetPromptSelection = 0;
   scanCancelled = false;
 
-  // Match the previous firmware's startup order: load credentials before creating the display
-  // task so SD I/O cannot overlap the first e-paper refresh or delay the radio scan.
   WIFI_STORE.loadFromFile();
 
   state = WifiSelectionState::SCANNING;
@@ -91,14 +85,15 @@ void WifiSelectionActivity::onEnter() {
   uint8_t mac[6];
   WiFi.macAddress(mac);
   char macStr[32];
-  snprintf(macStr, sizeof(macStr), "MAC address: %02x-%02x-%02x-%02x-%02x-%02x", mac[0], mac[1], mac[2], mac[3], mac[4],
-           mac[5]);
+  snprintf(macStr, sizeof(macStr), LanguageManager::translateText("MAC address: %02x-%02x-%02x-%02x-%02x-%02x"),
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
   cachedMacAddress = std::string(macStr);
 
   updateRequired = true;
 
-  const BaseType_t taskResult =
-      xTaskCreate(&WifiSelectionActivity::taskTrampoline, "WifiSelectionTask", 4096, this, 1, &displayTaskHandle);
+  const BaseType_t taskResult = xTaskCreateWithCaps(
+      &WifiSelectionActivity::taskTrampoline, "WifiSelectionTask", WIFI_DISPLAY_TASK_STACK, this, 1,
+      &displayTaskHandle, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   INX_SERIAL.printf("[%lu] [WIFI] display task result=%d handle=%p\n", millis(), static_cast<int>(taskResult),
                  displayTaskHandle);
 
@@ -120,8 +115,6 @@ void WifiSelectionActivity::onExit() {
   INX_SERIAL.printf("[%lu] [WIFI] exit scan stop=%d (%s)\n", millis(), static_cast<int>(stopped),
                  esp_err_to_name(stopped));
 
-  // Stop the renderer while holding the same mutex it uses. Deleting it after releasing the
-  // mutex can terminate the task in the middle of displayBuffer(), which is a renderer race.
   xSemaphoreTake(renderingMutex, portMAX_DELAY);
   networks.clear();
   selectedSSID.clear();
@@ -131,12 +124,12 @@ void WifiSelectionActivity::onExit() {
   cachedMacAddress.clear();
 
   if (displayTaskHandle) {
-    vTaskDelete(displayTaskHandle);
+    vTaskDeleteWithCaps(displayTaskHandle);
     displayTaskHandle = nullptr;
   }
 
   if (scanTaskHandle) {
-    vTaskDelete(scanTaskHandle);
+    vTaskDeleteWithCaps(scanTaskHandle);
     scanTaskHandle = nullptr;
   }
 
@@ -144,8 +137,6 @@ void WifiSelectionActivity::onExit() {
   vSemaphoreDelete(renderingMutex);
   renderingMutex = nullptr;
 
-  // esp_wifi_scan_get_ap_records() releases the driver's scan allocation. Clear any records left
-  // behind when the activity was closed while a scan was active.
   WiFi.scanDelete();
 
   exitActivity();
@@ -161,9 +152,6 @@ void WifiSelectionActivity::startWifiScan() {
   updateRequired = true;
   xSemaphoreGive(renderingMutex);
 
-  // Do not use Arduino's asynchronous scan wrapper: it declares an unfinished scan failed after
-  // max_ms_per_chan * 20, which is the 6-second failure visible in the device log. The ESP-IDF
-  // scan task below waits on the driver's own completion path instead.
   WiFi.scanDelete();
   const bool modeSet = WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
@@ -171,9 +159,9 @@ void WifiSelectionActivity::startWifiScan() {
   delay(100);
   scanStartedAt = millis();
   scanCancelled = false;
-  const BaseType_t result =
-      xTaskCreatePinnedToCore(&WifiSelectionActivity::scanTaskTrampoline, "WifiScanTask", 4096, this, 1,
-                              &scanTaskHandle, 1);
+  const BaseType_t result = xTaskCreatePinnedToCoreWithCaps(
+      &WifiSelectionActivity::scanTaskTrampoline, "WifiScanTask", 4096, this, 1, &scanTaskHandle, 1,
+      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   INX_SERIAL.printf("[%lu] [WIFI] native scan task result=%d handle=%p mode-set=%d disconnect=%d dwell=%lums mode=%d status=%d\n",
                  millis(), static_cast<int>(result), scanTaskHandle, modeSet, disconnected,
                  static_cast<unsigned long>(scanMaxMs), static_cast<int>(WiFi.getMode()), static_cast<int>(WiFi.status()));
@@ -200,10 +188,6 @@ void WifiSelectionActivity::scanTaskLoop() {
 
   std::vector<WifiNetworkInfo> foundNetworks;
   if (started == ESP_OK && !scanCancelled) {
-    // This scan was started through ESP-IDF directly, so Arduino's scanComplete()
-    // state is never marked as running and can remain WIFI_SCAN_FAILED (-2).
-    // Read the records owned by this native scan instead of depending on the
-    // Arduino wrapper's cache/event state.
     uint16_t count = 0;
     const esp_err_t countResult = esp_wifi_scan_get_ap_num(&count);
     INX_SERIAL.printf("[%lu] [WIFI] native scan records count=%u count-result=%d (%s)\n", millis(),
@@ -338,8 +322,6 @@ void WifiSelectionActivity::attemptConnection() {
   connectionError.clear();
   updateRequired = true;
 
-  // Credentials are managed by WIFI_STORE. Disable Arduino's persistent credentials and abort
-  // any SDK auto-connect before starting the explicit connection, as CrossPoint does.
   WiFi.persistent(false);
   WiFi.mode(WIFI_STA);
   WiFi.disconnect(true, true);
@@ -416,9 +398,6 @@ bool WifiSelectionActivity::handleTouchInput() {
   INX_SERIAL.printf("[STICKY][WIFI TOUCH] state=%d tap=(%d,%d) normalized=(%.3f,%.3f)\n",
                  static_cast<int>(state), tapX, tapY, tapNx, tapNy);
 
-  // The global loop normally turns the shared header icon into a Back edge. Keep a local
-  // hit-test as a fallback because this activity owns a child renderer/task and can receive a
-  // tap before that shared hit rectangle has been published.
   const bool headerBackHit = ScreenComponents::pageHeaderBackButtonHit(tapX, tapY) ||
                              (tapY < dividerY && tapX >= screenWidth - 96);
   if (headerBackHit) {
@@ -511,9 +490,6 @@ void WifiSelectionActivity::loop() {
 
   if (SubPage::closeInput(renderer, mappedInput, [this]() { onComplete(false); })) return;
 
-  // Back must be handled before the scan/connection state branches. The scanning branch returns
-  // immediately, which previously made the header back icon appear unresponsive while networks
-  // were still being discovered.
   if (mappedInput.wasPressed(MappedInputManager::Button::Back) ||
       mappedInput.wasReleased(MappedInputManager::Button::Back)) {
     onComplete(false);
@@ -637,8 +613,9 @@ void WifiSelectionActivity::displayTaskLoop() {
       const unsigned long renderStartedAt = millis();
       INX_SERIAL.printf("[%lu] [WIFI] render start state=%d\n", renderStartedAt, static_cast<int>(renderState));
       render(fullRefresh);
-      INX_SERIAL.printf("[%lu] [WIFI] render complete state=%d elapsed=%lums\n", millis(),
-                     static_cast<int>(renderState), millis() - renderStartedAt);
+      INX_SERIAL.printf("[%lu] [WIFI] render complete state=%d elapsed=%lums stack-free=%u\n", millis(),
+                     static_cast<int>(renderState), millis() - renderStartedAt,
+                     static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
     }
     xSemaphoreGive(renderingMutex);
     vTaskDelay(10 / portTICK_PERIOD_MS);
@@ -672,11 +649,6 @@ void WifiSelectionActivity::render(const bool fullRefresh) const {
       break;
   }
 
-  // The panel refresh itself does not need to keep the Wi-Fi task's mutex.
-  // displayBufferAsync() finishes the RAM transfer and swaps the dual buffers
-  // before it returns; the panel can run the FAST waveform while touch remains
-  // responsive.  The keyboard's entry rebase drains this one pending refresh
-  // before it changes the screen, so it never draws against the old list.
   renderer.displayBufferAsync(fullRefresh ? HalDisplay::FULL_REFRESH : HalDisplay::FAST_REFRESH);
   renderer.syncWriteBufferFromActive();
 }
@@ -768,7 +740,7 @@ void WifiSelectionActivity::renderNetworkList(int screenWidth, int screenHeight,
     }
 
     char countStr[32];
-    snprintf(countStr, sizeof(countStr), "%zu networks found", networks.size());
+    snprintf(countStr, sizeof(countStr), LanguageManager::translateText("%zu networks found"), networks.size());
     renderer.text.render(MONTSERRAT_8_FONT_ID, 20, screenHeight - 90, countStr);
     renderer.text.render(MONTSERRAT_8_FONT_ID, 20, screenHeight - 105, cachedMacAddress.c_str());
   }
@@ -812,7 +784,7 @@ void WifiSelectionActivity::renderConnectionFailed(const int screenWidth, const 
   const int errorY = dividerY + 40;
   renderer.text.centered(MONTSERRAT_10_FONT_ID, errorY - 20, connectionError.c_str());
 
-  std::string ssidInfo = "Network: " + selectedSSID;
+  std::string ssidInfo = std::string(LanguageManager::translateText("Network:")) + " " + selectedSSID;
   if (ssidInfo.length() > 25) {
     ssidInfo.replace(22, ssidInfo.length() - 22, "...");
   }

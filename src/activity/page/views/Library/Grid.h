@@ -16,8 +16,7 @@ class Grid final {
   Grid(GfxRenderer& renderer, MappedInputManager& mappedInput,
        const std::vector<LibraryIndex::Book>& items, std::function<void(int, bool)> select,
        std::function<bool(const LibraryIndex::Book&)> isFavorite,
-       std::function<void(int, int)> outsideTap,
-       std::function<bool(const LibraryIndex::Book&)> isAuthorFolder);
+       std::function<void(int, int)> outsideTap);
 
   void reset();
   bool handleInput();
@@ -27,7 +26,6 @@ class Grid final {
   static constexpr int itemsPerPage = 12;
   static constexpr int columns = 3;
   static constexpr int rows = 4;
-  // These are the legacy folder-grid dimensions.
   static constexpr int margin = 8;
   static constexpr int gapX = 8;
   static constexpr int minGapY = 6;
@@ -41,7 +39,6 @@ class Grid final {
   std::function<void(int, bool)> select;
   std::function<bool(const LibraryIndex::Book&)> isFavorite;
   std::function<void(int, int)> outsideTap;
-  std::function<bool(const LibraryIndex::Book&)> isAuthorFolder;
   int page = 0;
 
   int pageCount() const;
@@ -51,5 +48,5 @@ class Grid final {
   int itemAt(int x, int y) const;
 };
 
-}  // namespace library
-}  // namespace views
+}
+}
