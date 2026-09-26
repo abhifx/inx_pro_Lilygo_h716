@@ -65,6 +65,7 @@ class HalGPIO {
 
   int getBatteryPercentage() const;
 
+  bool isCharging() const;
   bool isUsbConnected() const;
 
   bool readDateTime(DateTime& outDateTime) const;

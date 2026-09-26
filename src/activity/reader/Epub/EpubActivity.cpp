@@ -1021,7 +1021,6 @@ void EpubActivity::startVoiceNoteForSelection(const std::string& selectedText, c
   if (!epub || !section || selectedText.empty()) {
     return;
   }
-/*
   const std::string voiceDirectory = epub->getCachePath() + "/voice";
   enterNewActivity(new VoiceNoteActivity(
       renderer, mappedInput, voiceDirectory,
@@ -1065,7 +1064,6 @@ void EpubActivity::restoreWordSelectionAfterNote() {
   INX_SERIAL.printf("[%lu] [WORD_SELECTION] restored after note anchor=%d focus=%d\n", millis(),
                     wordSelectionAnchor_, wordSelectionFocus_);
   renderWordSelection();
-}
 }
 
 bool EpubActivity::handleWordTouch() {

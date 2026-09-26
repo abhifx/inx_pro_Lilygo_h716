@@ -235,7 +235,6 @@ int naturalCompare(const std::string& left, const std::string& right) {
   if (leftPos == left.size() && rightPos == right.size()) return 0;
   return leftPos == left.size() ? -1 : 1;
 }
-}
 
 char firstLetter(const std::string& value) {
   for (const unsigned char c : value) {

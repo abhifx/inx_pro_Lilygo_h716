@@ -605,6 +605,10 @@ bool FontManager::loadFontFromSD(int fontId, GfxRenderer& renderer, const bool e
 }
 
 bool FontManager::ensureReaderLayoutFonts(int bodyFontId, GfxRenderer& renderer) {
+  if (!g_scannedForFonts) {
+    (void)scanSDFonts("/fonts", false);
+  }
+
   const int headerFontId = getNextFont(bodyFontId);
   // Drop caps select their proportional size when the parser encounters one.
   // Do not preload the family's largest size here; for outline fonts that is
@@ -625,24 +629,25 @@ bool FontManager::ensureReaderLayoutFonts(int bodyFontId, GfxRenderer& renderer)
     }
   }
 
-  bool needsSdLoad = false;
-  for (int i = 0; i < requiredCount; ++i) {
-    const int id = requiredIds[i];
-    if (id >= SD_FONT_START_ID && !isFontLoaded(id)) {
-      needsSdLoad = true;
-      break;
-    }
-  }
-
   for (int i = 0; i < requiredCount; ++i) {
     const int fontId = requiredIds[i];
     if (fontId >= SD_FONT_START_ID) {
       const bool cacheGlyphBitmaps = fontId == bodyFontId;
       if (!loadFontFromSD(fontId, renderer, cacheGlyphBitmaps)) {
-        return false;
+        INX_SERIAL.printf("[FontManager] Failed to load SD font ID %d; attempting fallback\n", fontId);
+        bool loadedAny = false;
+        for (auto& entry : g_sdFonts) {
+          if (loadFontFromSD(entry.id, renderer, cacheGlyphBitmaps)) {
+            loadedAny = true;
+            break;
+          }
+        }
+        if (!loadedAny) {
+          INX_SERIAL.printf("[FontManager] No SD fonts available, falling back to built-in font\n");
+        }
       }
-    } else if (!ensureFontReady(fontId, renderer)) {
-      return false;
+    } else {
+      ensureFontReady(fontId, renderer);
     }
   }
   return true;

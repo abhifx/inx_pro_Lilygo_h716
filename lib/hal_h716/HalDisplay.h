@@ -38,7 +38,9 @@ class HalDisplay {
 
   void displayGrayBuffer(bool quality = false, bool trackForRevert = true);
   void displayGrayBufferFastQuality();
+  void displayGrayscaleBase(RefreshMode fallback = HALF_REFRESH, bool turnOffScreen = false);
   void prepareQualityGrayscale();
+  bool refreshBusy() const;
 
   uint16_t getDisplayWidth() const;
   uint16_t getDisplayHeight() const;

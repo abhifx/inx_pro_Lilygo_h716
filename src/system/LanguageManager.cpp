@@ -6,6 +6,8 @@
 #include <cctype>
 #include <cstring>
 #include <string>
+#include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include "state/SystemSetting.h"
@@ -682,9 +684,19 @@ const char* findTranslation(const char* key) {
 }
 
 const char* findFallbackKey(const char* text) {
-  if (!text) return nullptr;
-  for (const FallbackKey& fallback : kFallbackKeys) {
-    if (std::strcmp(fallback.text, text) == 0) return fallback.key;
+  if (!text || text[0] == '\0') return nullptr;
+  static std::unordered_map<std::string_view, const char*> fallbackMap;
+  static bool mapInitialized = false;
+  if (!mapInitialized) {
+    fallbackMap.reserve(sizeof(kFallbackKeys) / sizeof(kFallbackKeys[0]));
+    for (const FallbackKey& fallback : kFallbackKeys) {
+      fallbackMap[fallback.text] = fallback.key;
+    }
+    mapInitialized = true;
+  }
+  auto it = fallbackMap.find(text);
+  if (it != fallbackMap.end()) {
+    return it->second;
   }
   return nullptr;
 }

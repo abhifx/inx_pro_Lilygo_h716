@@ -170,6 +170,10 @@ int HalGPIO::getBatteryPercentage() const {
     return batteryCachedPercent;
 }
 
+bool HalGPIO::isCharging() const {
+    return isUsbConnected();
+}
+
 bool HalGPIO::isUsbConnected() const {
     if (BoardConfig::ACTIVE.usbDetect < 0) {
         return false;

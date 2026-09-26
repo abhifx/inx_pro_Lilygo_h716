@@ -150,8 +150,26 @@ bool hasGlyph(const GfxRenderer& gfx, const EpdFontFamily& family, const uint32_
 
 int resolveFontForCodepoint(GfxRenderer& gfx, const int fontId, const uint32_t cp,
                             const EpdFontFamily::Style style) {
+  if (cp < 0x80 || cp == 0) return fontId;
   const EpdFontFamily* primary = findFontFamily(gfx, fontId);
-  if (!primary || hasGlyph(gfx, *primary, cp, style) || cp < 0x80 || cp == 0) return fontId;
+  if (!primary || hasGlyph(gfx, *primary, cp, style)) return fontId;
+
+  struct CacheEntry {
+    int primaryFontId = -1;
+    uint32_t cp = 0;
+    uint8_t style = 0;
+    int resolvedFontId = 0;
+  };
+  constexpr size_t kCacheSize = 64;
+  static CacheEntry cache[kCacheSize];
+  static size_t cacheIdx = 0;
+
+  const uint8_t styleVal = static_cast<uint8_t>(style);
+  for (size_t i = 0; i < kCacheSize; ++i) {
+    if (cache[i].cp == cp && cache[i].primaryFontId == fontId && cache[i].style == styleVal) {
+      return cache[i].resolvedFontId;
+    }
+  }
 
   int preferredPt = 14;
   if (const FontManager::FontInfo* info = FontManager::getFontInfo(fontId)) {
@@ -159,7 +177,15 @@ int resolveFontForCodepoint(GfxRenderer& gfx, const int fontId, const uint32_t c
   }
   const int fallbackId = FontManager::findLanguageFontForCodepoint(cp, preferredPt, style, gfx,
                                                                     LanguageManager::bookLanguageCode());
-  return fallbackId != 0 ? fallbackId : fontId;
+  const int result = (fallbackId != 0) ? fallbackId : fontId;
+
+  cache[cacheIdx].primaryFontId = fontId;
+  cache[cacheIdx].cp = cp;
+  cache[cacheIdx].style = styleVal;
+  cache[cacheIdx].resolvedFontId = result;
+  cacheIdx = (cacheIdx + 1) % kCacheSize;
+
+  return result;
 }
 
 bool embeddedGlyphBitmapIsValid(const EpdFontData* fontData, const EpdGlyph* glyph) {

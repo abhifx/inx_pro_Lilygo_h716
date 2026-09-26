@@ -31,6 +31,10 @@ class SDCardManager {
  public:
   SDCardManager();
   bool begin();
+  void shutdown() {
+    vol().end();
+    initialized = false;
+  }
   bool ready() const;
   // Returns the total card capacity in bytes. Cached at begin(); 0 if not mounted.
   uint64_t sdTotalBytes() const;

@@ -208,6 +208,16 @@ void HalDisplay::displayGrayBufferFastQuality() {
     displayGrayBuffer(false, false);
 }
 
+void HalDisplay::displayGrayscaleBase(RefreshMode fallback, bool turnOffScreen) {
+    (void)fallback;
+    (void)turnOffScreen;
+    displayGrayBuffer(true, true);
+}
+
+bool HalDisplay::refreshBusy() const {
+    return false;
+}
+
 void HalDisplay::prepareQualityGrayscale() {
     painter.setQuality(EPD_Painter::Quality::QUALITY_HIGH);
 }
